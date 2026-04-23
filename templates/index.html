@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>S&amp;R Extract</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand-wrap">
+            <div class="brand-logo">S&amp;R</div>
+            <h1 class="brand-title">S&amp;R Extract</h1>
+        </div>
+        <button class="about-icon-btn" type="button" id="aboutUsBtn" aria-label="About S&R Extract">
+            <img src="{{ url_for('asset_file', filename='icons8-about-us.svg') }}" alt="">
+            <span>About Us</span>
+        </button>
+    </header>
+
+    <main class="workspace">
+        <section class="left-stack">
+            <div class="badge">Live backend connected</div>
+            <h2 class="hero-title">Instagram Extraction Workspace</h2>
+            <p class="hero-text">
+                Enter the profile, date coverage, scroll depth, and Excel filename. The dashboard validates the setup,
+                asks for confirmation, then runs the extraction job through the Flask backend.
+            </p>
+
+            <form class="input-card" id="searchForm">
+                <div class="field full">
+                    <label for="instagramLink">Instagram profile link</label>
+                    <input id="instagramLink" type="text" placeholder="https://www.instagram.com/username/" autocomplete="off">
+                </div>
+
+                <div class="input-grid">
+                    <div class="field">
+                        <label for="scrollRounds">Scroll rounds</label>
+                        <input id="scrollRounds" type="number" min="1" value="26">
+                    </div>
+                    <div class="field">
+                        <label for="startDate">Start date</label>
+                        <input id="startDate" type="date" value="2026-01-01">
+                    </div>
+                    <div class="field">
+                        <label for="endDate">End date</label>
+                        <input id="endDate" type="date">
+                    </div>
+                    <div class="field">
+                        <label for="outputFile">Excel filename</label>
+                        <input id="outputFile" type="text" value="instagram_grouped_by_month.xlsx">
+                    </div>
+                </div>
+
+                <input type="hidden" id="overwrite" value="false">
+
+                <div class="option-row">
+                    <label class="latest-option">
+                        <input id="latestMode" type="checkbox" checked>
+                        <span>Collect from start date up to latest post</span>
+                    </label>
+                    <button class="review-btn" type="submit">Review Setup</button>
+                </div>
+
+                <div class="overwrite-panel hidden" id="overwritePanel">
+                    <strong id="overwriteText">File already exists.</strong>
+                    <div>
+                        <button class="small-action green" type="button" id="confirmOverwriteBtn">Overwrite</button>
+                        <button class="small-action rose" type="button" id="newFilenameBtn">New Name</button>
+                    </div>
+                </div>
+
+                <p class="form-message" id="formMessage" aria-live="polite"></p>
+            </form>
+        </section>
+
+        <section class="center-stack">
+            <section class="status-panel compact-status">
+                <div class="status-header">
+                    <div>
+                        <p class="status-label">Current status</p>
+                        <h3 id="statusTitle">Waiting for input</h3>
+                    </div>
+                    <span class="status-running" id="statusBadge">idle</span>
+                </div>
+
+                <div class="status-mini-grid">
+                    <div class="mini-card">
+                        <p>Profile Scrolled</p>
+                        <h4 id="scrollRoundText">Round 0 / 0</h4>
+                    </div>
+                    <div class="mini-card">
+                        <p>Current Post</p>
+                        <h4 id="currentPostText">None</h4>
+                    </div>
+                </div>
+
+                <div class="progress-block">
+                    <div class="progress-row"><span>Progress</span><span id="progressText">0%</span></div>
+                    <div class="progress-bar"><div class="progress-fill pink" id="progressFill" style="width: 0%;"></div></div>
+                </div>
+                <div class="progress-block">
+                    <div class="progress-row"><span>Success Rate</span><span id="successText">0%</span></div>
+                    <div class="progress-bar"><div class="progress-fill green" id="successFill" style="width: 0%;"></div></div>
+                </div>
+                <div class="progress-block">
+                    <div class="progress-row"><span>Scrape Health</span><span id="healthText">100%</span></div>
+                    <div class="progress-bar"><div class="progress-fill blue" id="healthFill" style="width: 100%;"></div></div>
+                </div>
+            </section>
+
+            <div class="center-actions">
+                <div class="output-box wide-output">
+                    <p>Output File</p>
+                    <strong id="outputFileText">Not selected</strong>
+                </div>
+
+                <button class="download-btn" type="button" id="downloadBtn" disabled>
+                    <span class="download-icon">↓</span>
+                    <span>Download</span>
+                </button>
+            </div>
+
+            <button class="cancel-btn" type="button" id="cancelBtn">Cancel</button>
+            <p class="cancel-note">Click to stop the collection process safely.</p>
+
+            <div class="quick-control-row">
+                <button class="control-btn start" type="button" id="runStartBtn">Run / Start</button>
+                <button class="control-btn pause" type="button" id="centerShowLogsBtn">Show Logs</button>
+            </div>
+
+        </section>
+
+        <section class="right-stack">
+            <section class="logs-panel" id="logsSection">
+                <div class="logs-header">
+                    <div>
+                        <p class="status-label">System monitor</p>
+                        <h3>Scrape Activity Logs</h3>
+                    </div>
+                    <button class="icon-only-btn" type="button" id="expandLogsBtn" aria-label="Expand logs">
+                        <img src="{{ url_for('asset_file', filename='icons8-expand-50.png') }}" alt="">
+                    </button>
+                </div>
+
+                <div class="log-tags">
+                    <span id="tagStartDate">Date: -</span>
+                    <span id="tagMaxScroll">Max Scroll: -</span>
+                    <span id="tagRound">Round: 0</span>
+                </div>
+
+                <div class="logs-table-wrap">
+                    <div class="logs-table-head logs-grid">
+                        <div>Time</div>
+                        <div>Level</div>
+                        <div>Action</div>
+                        <div>Details</div>
+                    </div>
+                    <div class="logs-body" id="logsBody"></div>
+                </div>
+
+                <div class="log-action-row">
+                    <button class="tiny-btn" type="button" id="refreshStatusBtn">Refresh Logs</button>
+                    <button class="tiny-btn yellow" type="button" id="showLogsBtn">Show Logs</button>
+                    <button class="tiny-btn rose" type="button" id="clearLogsBtn">Clear Logs</button>
+                </div>
+            </section>
+
+            <div class="stats-grid compact-stats">
+                <div class="stat-card">
+                    <p class="stat-label">Posts Found</p>
+                    <h3 class="stat-value" id="statPostsFound">0</h3>
+                </div>
+                <div class="stat-card">
+                    <p class="stat-label">Progress</p>
+                    <h3 class="stat-value" id="statProgress">0%</h3>
+                </div>
+                <div class="stat-card">
+                    <p class="stat-label">Success Rate</p>
+                    <h3 class="stat-value" id="statSuccessRate">0%</h3>
+                </div>
+                <div class="stat-card">
+                    <p class="stat-label">Errors</p>
+                    <h3 class="stat-value" id="statErrors">0</h3>
+                </div>
+            </div>
+
+            <div class="mini-feature-row">
+                {% for feature in features %}
+                <div class="feature-card mini-feature">
+                    <strong>{{ feature.icon }}</strong>
+                    <h3>{{ feature.title }}</h3>
+                    <p>{{ feature.description }}</p>
+                </div>
+                {% endfor %}
+            </div>
+        </section>
+    </main>
+
+    <div class="modal-backdrop review-confirmation-backdrop hidden" id="confirmationModal" role="presentation">
+        <section class="confirmation-modal review-confirmation-card" role="dialog" aria-modal="false" aria-labelledby="confirmationTitle">
+            <p class="status-label">Confirmation required</p>
+            <h3 id="confirmationTitle">Review scraping setup</h3>
+            <div class="summary-grid">
+                <span>Instagram link</span><strong id="summaryLink">-</strong>
+                <span>Scroll rounds</span><strong id="summaryScroll">-</strong>
+                <span>Date coverage</span><strong id="summaryCoverage">-</strong>
+                <span>Excel file</span><strong id="summaryFile">-</strong>
+            </div>
+            <div class="confirmation-actions">
+                <button type="button" class="control-btn start" id="confirmStartBtn">Confirm &amp; Start</button>
+                <button type="button" class="control-btn clear" id="editConfigBtn">Edit Inputs / Close</button>
+            </div>
+        </section>
+    </div>
+
+    <div class="side-drawer-backdrop hidden" id="logsModal">
+        <aside class="side-drawer logs-drawer">
+            <div class="drawer-header">
+                <div>
+                    <p class="status-label">Expanded monitor</p>
+                    <h3>Full Scrape Activity Logs</h3>
+                </div>
+                <button class="tiny-btn rose" type="button" id="closeLogsModalBtn">Close</button>
+            </div>
+            <div class="logs-table-wrap expanded-table">
+                <div class="logs-table-head logs-grid">
+                    <div>Time</div>
+                    <div>Level</div>
+                    <div>Action</div>
+                    <div>Details</div>
+                </div>
+                <div class="logs-body expanded-body" id="modalLogsBody"></div>
+            </div>
+            <div class="selected-log-card" id="selectedLogDetails">Select a log item to inspect its details.</div>
+        </aside>
+    </div>
+
+    <div class="side-drawer-backdrop hidden" id="aboutModal">
+        <div class="shanot-love" aria-hidden="true">I LOVE YOU <b>SHANOT</b></div>
+        <aside class="side-drawer about-drawer">
+            <div class="drawer-header">
+                <div>
+                    <p class="status-label">About us</p>
+                    <h3>S&amp;R Extract</h3>
+                </div>
+                <button class="drawer-close-btn" type="button" id="closeAboutModalBtn" aria-label="Close About Us">×</button>
+            </div>
+
+            <div class="about-content">
+                <h4>Key Features:</h4>
+                <p><strong>Easy Downloads:</strong> "S&amp;R Extract" allows you to download high-quality photos, videos, stories, reels, and IGTV videos directly from Instagram. Simply paste the link to the post you want to save, and the platform will provide a clear, downloadable file in seconds.</p>
+                <p><strong>Metric Insights:</strong> Gain valuable insights into the performance of any public Instagram post. "S&amp;R Extract" provides you with the crucial metrics of:</p>
+                <ul>
+                    <li><strong>Likes:</strong> Know exactly how many likes a post has received.</li>
+                    <li><strong>Comments:</strong> See the total number of comments on a post.</li>
+                </ul>
+                <p><strong>User-Friendly Interface:</strong> The platform boasts a simple and intuitive interface that makes it easy for users of all skill levels to navigate and utilize its features effectively.</p>
+                <p><strong>Fast and Reliable:</strong> "S&amp;R Extract" is built for speed and reliability, ensuring that you can access the information you need and download your content quickly and efficiently.</p>
+                <h4>Why Choose S&amp;R Extract?</h4>
+                <p><strong>Streamlined Workflow:</strong> Save time and effort by using a single platform for both downloading content and accessing performance metrics.</p>
+                <p><strong>Competitive Edge:</strong> Gain a competitive advantage by analyzing the performance of other users' posts and staying on top of industry trends.</p>
+                <p><strong>Comprehensive Tool:</strong> "S&amp;R Extract" is a versatile tool that caters to a wide range of needs, from content creation to data analysis.</p>
+                <p><strong>Safe and Secure:</strong> Your data is protected and secure with "S&amp;R Extract," giving you peace of mind while using the platform.</p>
+            </div>
+        </aside>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+</html>

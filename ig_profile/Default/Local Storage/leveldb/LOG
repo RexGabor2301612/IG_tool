@@ -1,0 +1,15 @@
+2026/04/22-21:53:14.019 3a58 Reusing MANIFEST S:\IG_analyzer\ig_profile\Default\Local Storage\leveldb/MANIFEST-000001
+2026/04/22-21:53:14.026 3a58 Recovering log #24
+2026/04/22-21:53:14.028 3a58 Reusing old log S:\IG_analyzer\ig_profile\Default\Local Storage\leveldb/000024.log 
+2026/04/22-21:53:22.658 5044 Level-0 table #28: started
+2026/04/22-21:53:22.663 5044 Level-0 table #28: 17881 bytes OK
+2026/04/22-21:53:22.665 5044 Delete type=0 #24
+2026/04/22-21:53:22.665 5044 Compacting 4@0 + 1@1 files
+2026/04/22-21:53:22.670 5044 Generated table #29@0: 1570 keys, 102194 bytes
+2026/04/22-21:53:22.670 5044 Compacted 4@0 + 1@1 files => 102194 bytes
+2026/04/22-21:53:22.671 5044 compacted to: files[ 0 1 1 0 0 0 0 ]
+2026/04/22-21:53:22.672 5044 Delete type=2 #17
+2026/04/22-21:53:22.672 5044 Delete type=2 #20
+2026/04/22-21:53:22.672 5044 Delete type=2 #22
+2026/04/22-21:53:22.672 5044 Delete type=2 #25
+2026/04/22-21:53:22.672 5044 Delete type=2 #28

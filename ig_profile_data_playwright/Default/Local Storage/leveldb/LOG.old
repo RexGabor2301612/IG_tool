@@ -1,0 +1,15 @@
+2026/04/22-19:15:10.326 54d0 Reusing MANIFEST s:\IG_analyzer\ig_profile_data_playwright\Default\Local Storage\leveldb/MANIFEST-000001
+2026/04/22-19:15:10.333 54d0 Recovering log #3
+2026/04/22-19:15:10.335 54d0 Reusing old log s:\IG_analyzer\ig_profile_data_playwright\Default\Local Storage\leveldb/000003.log 
+2026/04/22-19:17:30.194 54dc Level-0 table #5: started
+2026/04/22-19:17:30.204 54dc Level-0 table #5: 17814 bytes OK
+2026/04/22-19:17:30.208 54dc Delete type=0 #3
+2026/04/22-19:19:57.047 54dc Level-0 table #7: started
+2026/04/22-19:19:57.053 54dc Level-0 table #7: 15685 bytes OK
+2026/04/22-19:19:57.054 54dc Delete type=0 #4
+2026/04/22-19:21:37.519 54dc Level-0 table #9: started
+2026/04/22-19:21:37.525 54dc Level-0 table #9: 15247 bytes OK
+2026/04/22-19:21:37.527 54dc Delete type=0 #6
+2026/04/22-19:23:22.940 54dc Level-0 table #11: started
+2026/04/22-19:23:22.950 54dc Level-0 table #11: 15578 bytes OK
+2026/04/22-19:23:22.953 54dc Delete type=0 #8

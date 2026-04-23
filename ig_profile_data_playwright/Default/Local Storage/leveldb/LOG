@@ -1,0 +1,21 @@
+2026/04/22-19:38:44.101 14a0 Reusing MANIFEST s:\IG_analyzer\ig_profile_data_playwright\Default\Local Storage\leveldb/MANIFEST-000001
+2026/04/22-19:38:44.108 14a0 Recovering log #10
+2026/04/22-19:38:44.110 14a0 Reusing old log s:\IG_analyzer\ig_profile_data_playwright\Default\Local Storage\leveldb/000010.log 
+2026/04/22-19:39:44.120 3b44 Level-0 table #14: started
+2026/04/22-19:39:44.129 3b44 Level-0 table #14: 14949 bytes OK
+2026/04/22-19:39:44.132 3b44 Delete type=0 #10
+2026/04/22-19:43:44.653 3b44 Level-0 table #16: started
+2026/04/22-19:43:44.659 3b44 Level-0 table #16: 15197 bytes OK
+2026/04/22-19:43:44.661 3b44 Delete type=0 #13
+2026/04/22-19:43:44.661 3b44 Compacting 4@0 + 1@1 files
+2026/04/22-19:43:44.670 3b44 Generated table #17@0: 1029 keys, 70005 bytes
+2026/04/22-19:43:44.670 3b44 Compacted 4@0 + 1@1 files => 70005 bytes
+2026/04/22-19:43:44.671 3b44 compacted to: files[ 0 1 1 0 0 0 0 ]
+2026/04/22-19:43:44.672 3b44 Delete type=2 #7
+2026/04/22-19:43:44.672 3b44 Delete type=2 #9
+2026/04/22-19:43:44.672 3b44 Delete type=2 #11
+2026/04/22-19:43:44.672 3b44 Delete type=2 #14
+2026/04/22-19:43:44.672 3b44 Delete type=2 #16
+2026/04/22-19:45:37.074 3b44 Level-0 table #19: started
+2026/04/22-19:45:37.083 3b44 Level-0 table #19: 18377 bytes OK
+2026/04/22-19:45:37.087 3b44 Delete type=0 #15
