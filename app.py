@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -497,4 +498,5 @@ def download_output():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, use_reloader=False)
+    port = int(os.environ.get("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port, debug=True, use_reloader=False)
