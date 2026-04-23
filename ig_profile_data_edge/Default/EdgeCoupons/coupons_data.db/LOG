@@ -1,5 +1,0 @@
-2026/04/23-13:34:11.304 50fc Creating DB S:\IG_analyzer\ig_profile_data_edge\Default\EdgeCoupons/coupons_data.db since it was missing.
-2026/04/23-13:34:11.349 50fc Reusing MANIFEST S:\IG_analyzer\ig_profile_data_edge\Default\EdgeCoupons/coupons_data.db/MANIFEST-000001
-2026/04/23-13:34:11.502 5638 Level-0 table #5: started
-2026/04/23-13:34:11.506 5638 Level-0 table #5: 682121 bytes OK
-2026/04/23-13:34:11.509 5638 Delete type=0 #3

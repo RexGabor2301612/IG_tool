@@ -1,6 +1,0 @@
-2026/04/23-17:53:17.797 3924 Reusing MANIFEST S:\IG_analyzer\ig_profile_data\Default\Service Worker\Database/MANIFEST-000001
-2026/04/23-17:53:17.797 3924 Recovering log #4
-2026/04/23-17:53:17.800 3924 Reusing old log S:\IG_analyzer\ig_profile_data\Default\Service Worker\Database/000004.log 
-2026/04/23-17:55:16.708 1ef0 Level-0 table #8: started
-2026/04/23-17:55:16.736 1ef0 Level-0 table #8: 88098 bytes OK
-2026/04/23-17:55:16.738 1ef0 Delete type=0 #4
