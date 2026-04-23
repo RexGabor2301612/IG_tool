@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 from urllib.parse import urlparse
 
 from openpyxl import Workbook
@@ -25,6 +25,8 @@ OUTPUT_FILE = "instagram_grouped_by_month.xlsx"
 PLAYWRIGHT_STORAGE_STATE = os.getenv("PLAYWRIGHT_STORAGE_STATE", "").strip() or None
 PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").strip().lower() not in {"0", "false", "no", "off"}
 PLAYWRIGHT_AUTO_INSTALL = os.getenv("PLAYWRIGHT_AUTO_INSTALL", "true").strip().lower() not in {"0", "false", "no", "off"}
+INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME", "").strip()
+INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD", "").strip()
 # Only collect posts from this date onwards (Instagram shows newest first, so older posts appear later in scroll).
 START_DATE = datetime(2026, 1, 1)
 # Set to None to collect every discoverable post link during the crawl window.
@@ -54,6 +56,9 @@ SCOPED_TEXT_TIMEOUT = 1600
 BODY_TEXT_TIMEOUT = 2500
 NEXT_DATA_TIMEOUT = 1800
 BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
+PROFILE_GRID_SELECTOR = "a[href*='/p/'], a[href*='/reel/']"
+POST_PRIMARY_SELECTOR = "time, article"
+METRIC_SELECTOR = "svg[aria-label*='ike'], svg[aria-label*='omment'], article [role='button'] svg"
 DATE_INPUT_FORMAT = "%Y-%m-%d"
 VALID_INSTAGRAM_HOSTS = {"instagram.com", "www.instagram.com", "m.instagram.com"}
 INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
@@ -69,6 +74,11 @@ RESERVED_INSTAGRAM_PATHS = {
     "terms",
     "tv",
 }
+SLOW_SCROLL_SECONDS = 2.0
+SLOW_POST_SECONDS = 4.0
+LOGIN_FORM_TIMEOUT = 12000
+LOGIN_POST_SUBMIT_TIMEOUT = 15000
+LogHook = Callable[[str, str, str], None]
 
 
 @dataclass
@@ -89,6 +99,173 @@ class ScrapeConfig:
     start_date: datetime
     end_date: Optional[datetime]
     output_file: str
+
+
+def emit_log(log_hook: Optional[LogHook], level: str, action: str, details: str = "") -> None:
+    if log_hook is None:
+        return
+
+    try:
+        log_hook(level, action, details)
+    except Exception:
+        pass
+
+
+def get_storage_state_path(require_exists: bool = False) -> Optional[Path]:
+    if not PLAYWRIGHT_STORAGE_STATE:
+        return None
+
+    path = Path(PLAYWRIGHT_STORAGE_STATE)
+    if require_exists and not path.exists():
+        return None
+
+    return path
+
+
+def has_login_credentials() -> bool:
+    return bool(INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD)
+
+
+def wait_for_selector(page, selector: str, timeout_ms: int) -> bool:
+    try:
+        page.locator(selector).first.wait_for(timeout=timeout_ms)
+        return True
+    except Exception:
+        return False
+
+
+def collect_visible_post_links(page) -> List[str]:
+    return page.evaluate(
+        """() => {
+            const seen = new Set();
+            const results = [];
+            for (const anchor of document.querySelectorAll("a[href*='/p/'], a[href*='/reel/']")) {
+                const href = (anchor.href || "").split("?")[0];
+                if (!href || seen.has(href)) continue;
+                seen.add(href);
+                results.push(href);
+            }
+            return results;
+        }"""
+    )
+
+
+def wait_for_more_profile_links(page, previous_count: int, timeout_ms: int = SCROLL_WAIT_TIMEOUT) -> bool:
+    try:
+        page.wait_for_function(
+            """(prev) => {
+                const unique = new Set(
+                    Array.from(document.querySelectorAll("a[href*='/p/'], a[href*='/reel/']"))
+                        .map(anchor => (anchor.href || "").split("?")[0])
+                        .filter(Boolean)
+                );
+                return unique.size > prev;
+            }""",
+            arg=previous_count,
+            timeout=timeout_ms,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def click_button_if_visible(page, pattern: str, timeout_ms: int = 1200) -> bool:
+    try:
+        button = page.get_by_role("button", name=re.compile(pattern, re.IGNORECASE)).first
+        if button.count() > 0:
+            button.click(timeout=timeout_ms)
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+def save_storage_state(context, log_hook: Optional[LogHook] = None) -> None:
+    state_path = get_storage_state_path()
+    if state_path is None:
+        return
+
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        context.storage_state(path=str(state_path))
+        emit_log(log_hook, "INFO", "Session saved", str(state_path))
+    except Exception as exc:
+        emit_log(log_hook, "WARN", "Session save skipped", type(exc).__name__)
+
+
+def login_to_instagram_if_needed(page, context, profile_url: str, log_hook: Optional[LogHook] = None) -> bool:
+    if not has_login_credentials():
+        return False
+
+    username_selector = "input[name='username']"
+    password_selector = "input[name='password']"
+    login_form_selector = f"{username_selector}, {password_selector}"
+
+    if not wait_for_selector(page, login_form_selector, LOGIN_FORM_TIMEOUT):
+        return False
+
+    emit_log(log_hook, "INFO", "Instagram login", "Login form detected. Attempting secure env-based sign-in.")
+
+    try:
+        page.locator(username_selector).first.fill(INSTAGRAM_USERNAME)
+        page.locator(password_selector).first.fill(INSTAGRAM_PASSWORD)
+        page.locator("button[type='submit']").first.click(timeout=3000)
+    except Exception as exc:
+        emit_log(log_hook, "WARN", "Instagram login failed", type(exc).__name__)
+        return False
+
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=LOGIN_POST_SUBMIT_TIMEOUT)
+    except Exception:
+        pass
+
+    click_button_if_visible(page, r"not now|skip")
+    click_button_if_visible(page, r"save info|save login info")
+
+    page.goto(profile_url, wait_until="domcontentloaded", timeout=POST_GOTO_TIMEOUT)
+
+    if wait_for_selector(page, PROFILE_GRID_SELECTOR, LOGIN_POST_SUBMIT_TIMEOUT):
+        save_storage_state(context, log_hook)
+        emit_log(log_hook, "SUCCESS", "Instagram login", "Session is ready and profile grid is visible.")
+        return True
+
+    emit_log(log_hook, "WARN", "Instagram login incomplete", "Profile grid did not appear after sign-in.")
+    return False
+
+
+def prepare_profile_page(
+    page,
+    context,
+    profile_url: str,
+    timeout_ms: int = PROFILE_LINK_WAIT_TIMEOUT,
+    log_hook: Optional[LogHook] = None,
+) -> None:
+    start_time = time.perf_counter()
+    page.goto(profile_url, wait_until="domcontentloaded", timeout=POST_GOTO_TIMEOUT)
+
+    initial_wait = min(timeout_ms, PROFILE_LINK_WAIT_TIMEOUT)
+    if wait_for_selector(page, PROFILE_GRID_SELECTOR, initial_wait):
+        elapsed = time.perf_counter() - start_time
+        emit_log(log_hook, "INFO", "Profile ready", f"Grid detected in {elapsed:.2f}s.")
+        return
+
+    attempted_login = login_to_instagram_if_needed(page, context, profile_url, log_hook=log_hook)
+    if attempted_login:
+        elapsed = time.perf_counter() - start_time
+        emit_log(log_hook, "INFO", "Profile ready", f"Login-backed session restored in {elapsed:.2f}s.")
+        return
+
+    remaining_ms = max(500, timeout_ms - int((time.perf_counter() - start_time) * 1000))
+    if wait_for_selector(page, PROFILE_GRID_SELECTOR, remaining_ms):
+        elapsed = time.perf_counter() - start_time
+        emit_log(log_hook, "INFO", "Profile ready", f"Grid detected after extended wait in {elapsed:.2f}s.")
+        return
+
+    raise TimeoutError(
+        "Instagram profile grid did not become visible. The profile may require login, "
+        "Instagram may be blocking the cloud server, or the page loaded too slowly."
+    )
 
 
 def ask_yes_no(prompt: str) -> bool:
@@ -894,15 +1071,19 @@ def parse_datetime(date_str: str) -> Optional[datetime]:
 
 def wait_for_profile_ready(page) -> None:
     """Ensures profile page has loaded with post grid."""
-    try:
-        page.locator("a[href*='/p/'], a[href*='/reel/']").first.wait_for(timeout=PROFILE_LINK_WAIT_TIMEOUT)
-        page.wait_for_timeout(PROFILE_SETTLE_MS)
-    except Exception:
-        page.wait_for_timeout(PROFILE_RETRY_MS)
+    if wait_for_selector(page, PROFILE_GRID_SELECTOR, PROFILE_LINK_WAIT_TIMEOUT):
+        return
+
+    wait_for_selector(page, PROFILE_GRID_SELECTOR, PROFILE_RETRY_MS)
 
 
 def wait_for_post_ready(page, url: str) -> None:
     """Ensures post page has loaded with metadata (date, metrics)."""
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=1200)
+    except Exception:
+        pass
+
     try:
         page.locator("time").first.wait_for(timeout=POST_TIME_WAIT_TIMEOUT)
     except Exception:
@@ -913,23 +1094,17 @@ def wait_for_post_ready(page, url: str) -> None:
     except Exception:
         pass
 
-    page.wait_for_timeout(POST_SETTLE_MS)
-
 
 def wait_for_metric_elements(page) -> bool:
     """Wait for metric elements (likes/comments/shares) to appear on page."""
-    combined_metric_selector = "svg[aria-label*='ike'], svg[aria-label*='omment'], article [role='button'] svg"
-
-    try:
-        page.locator(combined_metric_selector).first.wait_for(timeout=METRIC_READY_TIMEOUT)
-        page.wait_for_timeout(METRIC_SETTLE_MS)
+    if wait_for_selector(page, METRIC_SELECTOR, METRIC_READY_TIMEOUT):
         return True
-    except Exception:
-        pass
 
-    page.wait_for_timeout(METRIC_FALLBACK_MS)
-    
-    return True
+    return wait_for_selector(
+        page,
+        "meta[property='og:description'], script#__NEXT_DATA__, script[type='application/ld+json']",
+        METRIC_FALLBACK_MS,
+    )
 
 
 def extract_date(page) -> tuple[str, Optional[datetime]]:
@@ -948,17 +1123,15 @@ def extract_date(page) -> tuple[str, Optional[datetime]]:
 def collect_post_links(page, max_posts: Optional[int] = None, scroll_rounds: int = MAX_SCROLL_ROUNDS) -> List[str]:
     links = {}  # Use dict instead of set to preserve insertion order (Python 3.7+)
     stagnant = 0
-    link_locator = page.locator("a[href*='/p/'], a[href*='/reel/']")
 
     wait_for_profile_ready(page)
     print(f"Starting collection: max_rounds={scroll_rounds}, stagnant_limit={MAX_STAGNANT_ROUNDS}")
 
     for scroll_round in range(scroll_rounds):
+        round_started = time.perf_counter()
         try:
-            link_locator.first.wait_for(timeout=PROFILE_LINK_WAIT_TIMEOUT)
-            found = link_locator.evaluate_all(
-                "els => els.map(a => a.href)"
-            )
+            wait_for_selector(page, PROFILE_GRID_SELECTOR, PROFILE_LINK_WAIT_TIMEOUT)
+            found = collect_visible_post_links(page)
         except Exception:
             print(f"  Scroll {scroll_round + 1}: Failed to find links")
             page.wait_for_timeout(PROFILE_RETRY_MS)
@@ -990,24 +1163,18 @@ def collect_post_links(page, max_posts: Optional[int] = None, scroll_rounds: int
         prev_count = len(links)
         page.mouse.wheel(0, 4000)
 
-        try:
-            page.wait_for_function(
-                """(prev) => {
-                    const anchors = Array.from(document.querySelectorAll("a[href*='/p/'], a[href*='/reel/']"));
-                    const unique = new Set(anchors.map(a => a.href.split("?")[0]));
-                    return unique.size > prev;
-                }""",
-                arg=prev_count,
-                timeout=SCROLL_WAIT_TIMEOUT
-            )
-        except Exception:
+        if not wait_for_more_profile_links(page, prev_count, SCROLL_WAIT_TIMEOUT):
             page.wait_for_timeout(SCROLL_FALLBACK_MS)
+
+        elapsed = time.perf_counter() - round_started
+        if elapsed >= SLOW_SCROLL_SECONDS:
+            print(f"  Scroll {scroll_round + 1}: Slow round ({elapsed:.2f}s)")
 
     print(f"Collection complete: {len(links)} unique links found\n")
     return list(links.keys())[:max_posts]  # Convert dict keys to list in insertion order
 
 
-def extract_post_data(page, url: str) -> PostData:
+def extract_post_data(page, url: str, log_hook: Optional[LogHook] = None) -> PostData:
     post_type = "Unknown"
     raw_date = ""
     date_obj: Optional[datetime] = None
@@ -1016,6 +1183,7 @@ def extract_post_data(page, url: str) -> PostData:
     shares: int = 0  # Default to 0 if not found
 
     for attempt in range(1, POST_LOAD_RETRIES + 1):
+        attempt_started = time.perf_counter()
         try:
             # Navigate to the post URL
             page.goto(url, wait_until="domcontentloaded", timeout=POST_GOTO_TIMEOUT)
@@ -1038,6 +1206,8 @@ def extract_post_data(page, url: str) -> PostData:
             likes = extracted_likes
             comments = extracted_comments
             shares = extracted_shares if extracted_shares is not None else 0
+
+            elapsed = time.perf_counter() - attempt_started
             
             # Log what we found
             found_metrics = []
@@ -1048,15 +1218,32 @@ def extract_post_data(page, url: str) -> PostData:
             found_metrics.append(f"shares={shares}")
             
             if found_metrics:
-                print(f"    Attempt {attempt}: Extracted {', '.join(found_metrics)}")
+                print(f"    Attempt {attempt}: Extracted {', '.join(found_metrics)} in {elapsed:.2f}s")
             else:
-                print(f"    Attempt {attempt}: No metrics extracted (continuing attempts)")
-            
-            # Success - break retry loop
+                print(f"    Attempt {attempt}: No metrics extracted after {elapsed:.2f}s")
+
+            if elapsed >= SLOW_POST_SECONDS:
+                emit_log(log_hook, "WARN", "Slow post", f"{url} took {elapsed:.2f}s on attempt {attempt}.")
+
+            missing_critical_metrics = likes is None and comments is None
+            if missing_critical_metrics and attempt < POST_LOAD_RETRIES:
+                emit_log(log_hook, "WARN", "Retrying post", f"{url} missing likes/comments on attempt {attempt}.")
+                wait_time = 600 if attempt == 1 else 1500
+                page.wait_for_timeout(wait_time)
+                continue
+
+            emit_log(
+                log_hook,
+                "INFO",
+                f"Attempt {attempt}",
+                f"{url} -> likes={likes}, comments={comments}, shares={shares}, date={raw_date or 'N/A'} ({elapsed:.2f}s)",
+            )
             break
             
         except Exception as e:
+            elapsed = time.perf_counter() - attempt_started
             print(f"    Attempt {attempt}: Error - {type(e).__name__}")
+            emit_log(log_hook, "WARN", f"Attempt {attempt} failed", f"{url} ({type(e).__name__}, {elapsed:.2f}s)")
             if attempt == POST_LOAD_RETRIES:
                 # Final attempt failed - mark with "Cannot detect"
                 post_type = "Unknown"
@@ -1223,8 +1410,9 @@ def launch_browser(playwright):
         "ignore_https_errors": True,
     }
 
-    if PLAYWRIGHT_STORAGE_STATE:
-        context_options["storage_state"] = PLAYWRIGHT_STORAGE_STATE
+    state_path = get_storage_state_path(require_exists=True)
+    if state_path is not None:
+        context_options["storage_state"] = str(state_path)
 
     context = browser.new_context(**context_options)
     return browser, context
@@ -1235,16 +1423,16 @@ def run_scrape(context, config: ScrapeConfig) -> None:
     context.route("**/*", route_nonessential_resources)
 
     page = context.new_page()
-    page.goto(config.profile_url, wait_until="domcontentloaded", timeout=POST_GOTO_TIMEOUT)
 
     if PLAYWRIGHT_HEADLESS:
         print("Running in headless mode. Manual Instagram login prompt is skipped.")
         if PLAYWRIGHT_STORAGE_STATE:
             print(f"Using Playwright storage state: {PLAYWRIGHT_STORAGE_STATE}")
     else:
+        page.goto(config.profile_url, wait_until="domcontentloaded", timeout=POST_GOTO_TIMEOUT)
         input("Log in to Instagram if needed, then press Enter... ")
 
-    page.goto(config.profile_url, wait_until="domcontentloaded", timeout=POST_GOTO_TIMEOUT)
+    prepare_profile_page(page, context, config.profile_url)
 
     links = collect_post_links(page, MAX_POSTS, config.scroll_rounds)
     print(f"Found {len(links)} posts.")
@@ -1313,4 +1501,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

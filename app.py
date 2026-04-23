@@ -236,7 +236,6 @@ def config_to_summary(config: WebScrapeConfig) -> dict[str, str]:
 def collect_post_links_with_progress(page, config: WebScrapeConfig) -> list[str]:
     links: dict[str, bool] = {}
     stagnant = 0
-    link_locator = page.locator("a[href*='/p/'], a[href*='/reel/']")
 
     scraper.wait_for_profile_ready(page)
     JOB.update(active_task="Collecting post links", total_scroll_rounds=config.scroll_rounds)
@@ -247,10 +246,11 @@ def collect_post_links_with_progress(page, config: WebScrapeConfig) -> list[str]
             raise ScrapeCancelled("Cancelled during profile scrolling.")
 
         JOB.update(current_scroll_round=scroll_round, active_task="Collecting post links")
+        round_started = time.perf_counter()
 
         try:
-            link_locator.first.wait_for(timeout=scraper.PROFILE_LINK_WAIT_TIMEOUT)
-            found = link_locator.evaluate_all("els => els.map(a => a.href)")
+            scraper.wait_for_selector(page, scraper.PROFILE_GRID_SELECTOR, scraper.PROFILE_LINK_WAIT_TIMEOUT)
+            found = scraper.collect_visible_post_links(page)
         except Exception as exc:
             JOB.update(errors=JOB.snapshot()["errors"] + 1)
             JOB.add_log("WARN", f"Scroll round {scroll_round} failed", type(exc).__name__)
@@ -280,23 +280,17 @@ def collect_post_links_with_progress(page, config: WebScrapeConfig) -> list[str]
 
         prev_count = len(links)
         page.mouse.wheel(0, 4000)
-        try:
-            page.wait_for_function(
-                """(prev) => {
-                    const anchors = Array.from(document.querySelectorAll("a[href*='/p/'], a[href*='/reel/']"));
-                    const unique = new Set(anchors.map(a => a.href.split("?")[0]));
-                    return unique.size > prev;
-                }""",
-                arg=prev_count,
-                timeout=scraper.SCROLL_WAIT_TIMEOUT,
-            )
-        except Exception:
+        if not scraper.wait_for_more_profile_links(page, prev_count, scraper.SCROLL_WAIT_TIMEOUT):
             page.wait_for_timeout(scraper.SCROLL_FALLBACK_MS)
+
+        elapsed = time.perf_counter() - round_started
+        if elapsed >= scraper.SLOW_SCROLL_SECONDS:
+            JOB.add_log("WARN", "Slow scroll", f"Round {scroll_round} took {elapsed:.2f}s.")
 
     return list(links.keys())
 
 
-def wait_for_profile_after_login(page) -> None:
+def wait_for_profile_after_login(page, context, profile_url: str) -> None:
     """Give the user time to complete Instagram login in the opened browser."""
     JOB.update(active_task="Waiting for Instagram profile")
     if scraper.PLAYWRIGHT_HEADLESS:
@@ -310,22 +304,16 @@ def wait_for_profile_after_login(page) -> None:
         timeout_ms = LOGIN_READY_TIMEOUT
         JOB.add_log("INFO", "Waiting for profile", "Log in in the opened browser if Instagram asks.")
 
-    deadline = time.time() + (timeout_ms / 1000)
-    while time.time() < deadline:
-        if JOB.should_cancel():
-            raise ScrapeCancelled("Cancelled while waiting for Instagram login/profile.")
+    if JOB.should_cancel():
+        raise ScrapeCancelled("Cancelled while waiting for Instagram login/profile.")
 
-        try:
-            page.locator("a[href*='/p/'], a[href*='/reel/']").first.wait_for(timeout=2000)
-            break
-        except Exception:
-            continue
-    else:
-        raise TimeoutError(
-            "Instagram profile grid did not become visible. The profile may require login, "
-            "Instagram may be blocking the cloud server, or the page loaded too slowly."
-        )
-
+    scraper.prepare_profile_page(
+        page,
+        context,
+        profile_url,
+        timeout_ms=timeout_ms,
+        log_hook=JOB.add_log,
+    )
     JOB.add_log("SUCCESS", "Profile detected", "Post grid is visible; scraping can continue.")
 
 
@@ -348,15 +336,20 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
             context.route("**/*", scraper.route_nonessential_resources)
 
             page = context.new_page()
-            page.goto(config.profile_url, wait_until="domcontentloaded", timeout=scraper.POST_GOTO_TIMEOUT)
             JOB.add_log("INFO", "Browser opened", "Cloud-safe headless Playwright context started.")
             if scraper.PLAYWRIGHT_STORAGE_STATE:
                 JOB.add_log("INFO", "Storage state loaded", scraper.PLAYWRIGHT_STORAGE_STATE)
-            wait_for_profile_after_login(page)
+            wait_for_profile_after_login(page, context, config.profile_url)
 
+            link_collection_started = time.perf_counter()
             links = collect_post_links_with_progress(page, config)
+            link_collection_elapsed = time.perf_counter() - link_collection_started
             JOB.update(posts_found=len(links), active_task="Extracting post data")
-            JOB.add_log("SUCCESS", "Link collection complete", f"Found {len(links)} unique post links.")
+            JOB.add_log(
+                "SUCCESS",
+                "Link collection complete",
+                f"Found {len(links)} unique post links in {link_collection_elapsed:.2f}s.",
+            )
 
             all_posts = []
             total_links = len(links)
@@ -371,9 +364,12 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                     progress=20 + round(70 * (index - 1) / max(total_links, 1)),
                 )
                 JOB.add_log("INFO", f"Processing {index}/{total_links}", link)
+                needs_cooldown = False
 
                 try:
-                    post = scraper.extract_post_data(page, link)
+                    post_started = time.perf_counter()
+                    post = scraper.extract_post_data(page, link, log_hook=JOB.add_log)
+                    post_elapsed = time.perf_counter() - post_started
                     all_posts.append(post)
                     success = post.likes is not None or post.comments is not None
                     if success:
@@ -382,19 +378,24 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                         JOB.add_log(
                             "SUCCESS",
                             "Extracted post",
-                            f"Likes: {post.likes}, Comments: {post.comments}, Shares: {post.shares}, Date: {scraper.format_post_date(post)}",
+                            f"Likes: {post.likes}, Comments: {post.comments}, Shares: {post.shares}, Date: {scraper.format_post_date(post)}, Took: {post_elapsed:.2f}s",
                         )
                     else:
                         snapshot = JOB.snapshot()
                         JOB.update(errors=snapshot["errors"] + 1)
                         JOB.add_log("WARN", "Metrics incomplete", link)
+                        needs_cooldown = True
+                    if post_elapsed >= scraper.SLOW_POST_SECONDS:
+                        JOB.add_log("WARN", "Slow extraction", f"{link} took {post_elapsed:.2f}s.")
                 except Exception as exc:
                     snapshot = JOB.snapshot()
                     JOB.update(errors=snapshot["errors"] + 1)
                     JOB.add_log("WARN", "Post extraction failed", f"{link} ({type(exc).__name__})")
+                    needs_cooldown = True
 
                 JOB.update(posts_processed=index, progress=20 + round(70 * index / max(total_links, 1)))
-                time.sleep(scraper.BASE_POST_DELAY)
+                if needs_cooldown:
+                    time.sleep(scraper.BASE_POST_DELAY)
 
             if JOB.should_cancel():
                 raise ScrapeCancelled("Cancelled before saving Excel output.")
