@@ -80,34 +80,66 @@ document.addEventListener("DOMContentLoaded", function () {
         };
     }
 
+    function wait(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
     async function fetchJson(url, options = {}) {
-        const response = await fetch(url, {
-            headers: { "Content-Type": "application/json" },
-            ...options,
-        });
-        const contentType = response.headers.get("content-type") || "";
-        let data;
+        const {
+            retries = 0,
+            retryDelay = 900,
+            ...fetchOptions
+        } = options;
 
-        if (contentType.includes("application/json")) {
-            data = await response.json();
-        } else {
-            const text = await response.text();
-            const message = response.ok
-                ? "The server returned a non-JSON response."
-                : `The server returned ${response.status}. The app may still be starting, restarting, or timed out.`;
-            data = {
-                ok: false,
-                errors: [message],
-                raw: text.slice(0, 300),
-            };
+        for (let attempt = 0; attempt <= retries; attempt += 1) {
+            try {
+                const response = await fetch(url, {
+                    headers: { "Content-Type": "application/json" },
+                    ...fetchOptions,
+                });
+                const contentType = response.headers.get("content-type") || "";
+                let data;
+
+                if (contentType.includes("application/json")) {
+                    data = await response.json();
+                } else {
+                    const text = await response.text();
+                    const transient = [502, 503, 504].includes(response.status);
+                    const message = response.ok
+                        ? "The server returned a non-JSON response."
+                        : transient
+                            ? "Render is waking up, restarting, or busy. Please wait a moment and try again."
+                            : `The server returned ${response.status}. Please refresh and try again.`;
+                    data = {
+                        ok: false,
+                        errors: [message],
+                        raw: text.slice(0, 300),
+                    };
+                }
+
+                if (!response.ok) {
+                    const transient = [502, 503, 504].includes(response.status);
+                    if (transient && attempt < retries) {
+                        await wait(retryDelay * (attempt + 1));
+                        continue;
+                    }
+
+                    const error = new Error((data.errors || ["Request failed"]).join("\n"));
+                    error.payload = data;
+                    throw error;
+                }
+
+                return data;
+            } catch (error) {
+                if (attempt < retries && error instanceof TypeError) {
+                    await wait(retryDelay * (attempt + 1));
+                    continue;
+                }
+                throw error;
+            }
         }
 
-        if (!response.ok) {
-            const error = new Error((data.errors || ["Request failed"]).join("\n"));
-            error.payload = data;
-            throw error;
-        }
-        return data;
+        throw new Error("Request failed after retrying.");
     }
 
     function setProgress(fillId, textId, value) {
@@ -208,7 +240,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
     async function refreshStatus() {
         try {
-            const data = await fetchJson("/api/status");
+            const data = await fetchJson("/api/status", { retries: 2 });
             renderStatus(data);
         } catch (error) {
             showMessage(error.message);
@@ -242,6 +274,7 @@ document.addEventListener("DOMContentLoaded", function () {
             const data = await fetchJson("/api/validate", {
                 method: "POST",
                 body: JSON.stringify(payload),
+                retries: 1,
             });
             confirmedPayload = payload;
             fillConfirmation(data.config);
