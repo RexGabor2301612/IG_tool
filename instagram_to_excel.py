@@ -1,8 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
 import re
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -12,7 +14,7 @@ from typing import Any, List, Optional
 from urllib.parse import urlparse
 
 from openpyxl import Workbook
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
 
 PROFILE_URL = "https://www.instagram.com/cebuanalhuillier/"
@@ -22,6 +24,7 @@ OUTPUT_FILE = "instagram_grouped_by_month.xlsx"
 # provide an exported login state file in your deployment environment.
 PLAYWRIGHT_STORAGE_STATE = os.getenv("PLAYWRIGHT_STORAGE_STATE", "").strip() or None
 PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").strip().lower() not in {"0", "false", "no", "off"}
+PLAYWRIGHT_AUTO_INSTALL = os.getenv("PLAYWRIGHT_AUTO_INSTALL", "true").strip().lower() not in {"0", "false", "no", "off"}
 # Only collect posts from this date onwards (Instagram shows newest first, so older posts appear later in scroll).
 START_DATE = datetime(2026, 1, 1)
 # Set to None to collect every discoverable post link during the crawl window.
@@ -1174,11 +1177,25 @@ def route_nonessential_resources(route) -> None:
     route.continue_()
 
 
+def install_playwright_browsers() -> None:
+    """Install Chromium browser binaries when a cloud build skipped them."""
+    command = [
+        sys.executable,
+        "-m",
+        "playwright",
+        "install",
+        "chromium",
+        "chromium-headless-shell",
+    ]
+    print("Installing missing Playwright browser binaries...")
+    subprocess.run(command, check=True, timeout=240)
+
+
 def launch_browser(playwright):
     """Create a cloud-safe Playwright browser/context pair."""
-    browser = playwright.chromium.launch(
-        headless=PLAYWRIGHT_HEADLESS,
-        args=[
+    launch_options = {
+        "headless": PLAYWRIGHT_HEADLESS,
+        "args": [
             "--no-sandbox",
             "--disable-setuid-sandbox",
             "--disable-dev-shm-usage",
@@ -1186,7 +1203,18 @@ def launch_browser(playwright):
             "--no-first-run",
             "--no-default-browser-check",
         ],
-    )
+    }
+
+    try:
+        browser = playwright.chromium.launch(**launch_options)
+    except PlaywrightError as exc:
+        message = str(exc)
+        missing_browser = "Executable doesn't exist" in message or "Please run the following command" in message
+        if not (PLAYWRIGHT_AUTO_INSTALL and missing_browser):
+            raise
+
+        install_playwright_browsers()
+        browser = playwright.chromium.launch(**launch_options)
 
     context_options = {
         "viewport": {"width": 1400, "height": 900},
