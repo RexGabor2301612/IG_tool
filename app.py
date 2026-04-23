@@ -326,19 +326,18 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
     )
     JOB.add_log("INFO", "Job started", f"Output: {config.output_file}")
 
+    browser = None
     context = None
     try:
         with sync_playwright() as p:
-            context = p.chromium.launch_persistent_context(
-                scraper.USER_DATA_DIR,
-                headless=False,
-                viewport={"width": 1400, "height": 900},
-            )
+            browser, context = scraper.launch_browser(p)
             context.route("**/*", scraper.route_nonessential_resources)
 
             page = context.new_page()
             page.goto(config.profile_url, wait_until="domcontentloaded", timeout=scraper.POST_GOTO_TIMEOUT)
-            JOB.add_log("INFO", "Browser opened", "If Instagram asks for login, complete it in the opened browser.")
+            JOB.add_log("INFO", "Browser opened", "Cloud-safe headless Playwright context started.")
+            if scraper.PLAYWRIGHT_STORAGE_STATE:
+                JOB.add_log("INFO", "Storage state loaded", scraper.PLAYWRIGHT_STORAGE_STATE)
             wait_for_profile_after_login(page)
 
             links = collect_post_links_with_progress(page, config)
@@ -412,6 +411,11 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
         if context is not None:
             try:
                 context.close()
+            except Exception:
+                pass
+        if browser is not None:
+            try:
+                browser.close()
             except Exception:
                 pass
 

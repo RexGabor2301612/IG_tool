@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -16,7 +17,11 @@ from playwright.sync_api import sync_playwright
 
 PROFILE_URL = "https://www.instagram.com/cebuanalhuillier/"
 OUTPUT_FILE = "instagram_grouped_by_month.xlsx"
-USER_DATA_DIR = "ig_profile_data"
+# Persistent browser profiles are intentionally not used in cloud hosting.
+# Use PLAYWRIGHT_STORAGE_STATE=/path/to/state.json only if you intentionally
+# provide an exported login state file in your deployment environment.
+PLAYWRIGHT_STORAGE_STATE = os.getenv("PLAYWRIGHT_STORAGE_STATE", "").strip() or None
+PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").strip().lower() not in {"0", "false", "no", "off"}
 # Only collect posts from this date onwards (Instagram shows newest first, so older posts appear later in scroll).
 START_DATE = datetime(2026, 1, 1)
 # Set to None to collect every discoverable post link during the crawl window.
@@ -1169,76 +1174,115 @@ def route_nonessential_resources(route) -> None:
     route.continue_()
 
 
+def launch_browser(playwright):
+    """Create a cloud-safe Playwright browser/context pair."""
+    browser = playwright.chromium.launch(
+        headless=PLAYWRIGHT_HEADLESS,
+        args=[
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ],
+    )
+
+    context_options = {
+        "viewport": {"width": 1400, "height": 900},
+        "locale": "en-US",
+        "timezone_id": "Asia/Manila",
+        "ignore_https_errors": True,
+    }
+
+    if PLAYWRIGHT_STORAGE_STATE:
+        context_options["storage_state"] = PLAYWRIGHT_STORAGE_STATE
+
+    context = browser.new_context(**context_options)
+    return browser, context
+
+
+def run_scrape(context, config: ScrapeConfig) -> None:
+    """Run the existing scraping flow with an already-created browser context."""
+    context.route("**/*", route_nonessential_resources)
+
+    page = context.new_page()
+    page.goto(config.profile_url, wait_until="domcontentloaded", timeout=POST_GOTO_TIMEOUT)
+
+    if PLAYWRIGHT_HEADLESS:
+        print("Running in headless mode. Manual Instagram login prompt is skipped.")
+        if PLAYWRIGHT_STORAGE_STATE:
+            print(f"Using Playwright storage state: {PLAYWRIGHT_STORAGE_STATE}")
+    else:
+        input("Log in to Instagram if needed, then press Enter... ")
+
+    page.goto(config.profile_url, wait_until="domcontentloaded", timeout=POST_GOTO_TIMEOUT)
+
+    links = collect_post_links(page, MAX_POSTS, config.scroll_rounds)
+    print(f"Found {len(links)} posts.")
+
+    all_posts = []
+    old_posts_count = 0
+    missing_metrics_count = 0
+    post_delay = BASE_POST_DELAY
+    consecutive_misses = 0
+
+    for i, link in enumerate(links, start=1):
+        print(f"[{i}/{len(links)}] Processing: {link}")
+        post = extract_post_data(page, link)
+        all_posts.append(post)
+
+        missing = []
+        if post.likes is None:
+            missing.append("likes")
+        if post.comments is None:
+            missing.append("comments")
+
+        if missing:
+            missing_metrics_count += 1
+            consecutive_misses += 1
+            post_delay = min(MAX_POST_DELAY, BASE_POST_DELAY + 0.1 * consecutive_misses)
+            print(f"    Slow load: missing {', '.join(missing)} - will show Cannot detect")
+        else:
+            consecutive_misses = 0
+            post_delay = BASE_POST_DELAY
+            print("    Metrics loaded")
+
+        time.sleep(post_delay)
+
+    if missing_metrics_count > 0:
+        pct = round(100 * missing_metrics_count / len(links), 1)
+        print(f"\n{missing_metrics_count}/{len(links)} posts ({pct}%) had slow-loading metrics.")
+        print("These posts are still included with Cannot detect for missing metrics.\n")
+
+    filtered_posts = []
+    for post in all_posts:
+        if post_matches_date_coverage(post, config.start_date, config.end_date):
+            filtered_posts.append(post)
+        else:
+            old_posts_count += 1
+
+    if old_posts_count > 0:
+        coverage = format_date_coverage(config.start_date, config.end_date)
+        print(f"Filtered out {old_posts_count} posts outside {coverage}.")
+
+    coverage = format_date_coverage(config.start_date, config.end_date)
+    print(f"Processing {len(filtered_posts)} posts within valid date range.")
+    save_grouped_excel(filtered_posts, config.output_file, coverage)
+    print(f"Saved to {config.output_file}")
+
+
 def main():
     config = prompt_scrape_config()
 
     with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
-            USER_DATA_DIR,
-            headless=False,
-            viewport={"width": 1400, "height": 900},
-        )
-        context.route("**/*", route_nonessential_resources)
-
-        page = context.new_page()
-        page.goto(config.profile_url, wait_until="domcontentloaded", timeout=POST_GOTO_TIMEOUT)
-
-        input("Log in to Instagram if needed, then press Enter... ")
-        page.goto(config.profile_url, wait_until="domcontentloaded", timeout=POST_GOTO_TIMEOUT)
-
-        links = collect_post_links(page, MAX_POSTS, config.scroll_rounds)
-        print(f"Found {len(links)} posts.")
-
-        all_posts = []
-        old_posts_count = 0
-        missing_metrics_count = 0
-        post_delay = BASE_POST_DELAY
-        consecutive_misses = 0
-        for i, link in enumerate(links, start=1):
-            print(f"[{i}/{len(links)}] Processing: {link}")
-            post = extract_post_data(page, link)
-            all_posts.append(post)
-
-            missing = []
-            if post.likes is None:
-                missing.append("likes")
-            if post.comments is None:
-                missing.append("comments")
-            
-            if missing:
-                missing_metrics_count += 1
-                consecutive_misses += 1
-                post_delay = min(MAX_POST_DELAY, BASE_POST_DELAY + 0.1 * consecutive_misses)
-                print(f"    ⚠ Slow load: missing {', '.join(missing)} - will show Cannot detect")
-            else:
-                consecutive_misses = 0
-                post_delay = BASE_POST_DELAY
-                print(f"    ✓ Metrics loaded")
-            
-            time.sleep(post_delay)
-        
-        if missing_metrics_count > 0:
-            pct = round(100 * missing_metrics_count / len(links), 1)
-            print(f"\n{missing_metrics_count}/{len(links)} posts ({pct}%) had slow-loading metrics.")
-            print(f"These posts are still included with Cannot detect for missing metrics.\n")
-
-        # Filter posts to match the user-selected date coverage.
-        filtered_posts = []
-        for post in all_posts:
-            if post_matches_date_coverage(post, config.start_date, config.end_date):
-                filtered_posts.append(post)
-            else:
-                old_posts_count += 1
-
-        if old_posts_count > 0:
-            print(f"Filtered out {old_posts_count} posts outside {format_date_coverage(config.start_date, config.end_date)}.")
-
-        print(f"Processing {len(filtered_posts)} posts within valid date range.")
-        save_grouped_excel(filtered_posts, config.output_file, format_date_coverage(config.start_date, config.end_date))
-        print(f"Saved to {config.output_file}")
-
-        context.close()
-
+        browser, context = launch_browser(p)
+        try:
+            run_scrape(context, config)
+        finally:
+            context.close()
+            browser.close()
 
 if __name__ == "__main__":
     main()
+
