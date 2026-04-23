@@ -4,7 +4,7 @@ services:
     env: python
     plan: free
     buildCommand: bash build.sh
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 300
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 900 --graceful-timeout 60
     envVars:
       - key: PLAYWRIGHT_HEADLESS
         value: "true"

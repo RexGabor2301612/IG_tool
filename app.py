@@ -117,6 +117,7 @@ class ScrapeJobState:
 JOB = ScrapeJobState()
 JOB_THREAD: Optional[threading.Thread] = None
 LOGIN_READY_TIMEOUT = 180000
+HEADLESS_PROFILE_READY_TIMEOUT = 45000
 
 
 def empty_stats() -> list[dict[str, str]]:
@@ -298,9 +299,18 @@ def collect_post_links_with_progress(page, config: WebScrapeConfig) -> list[str]
 def wait_for_profile_after_login(page) -> None:
     """Give the user time to complete Instagram login in the opened browser."""
     JOB.update(active_task="Waiting for Instagram profile")
-    JOB.add_log("INFO", "Waiting for profile", "Log in in the opened browser if Instagram asks.")
+    if scraper.PLAYWRIGHT_HEADLESS:
+        timeout_ms = HEADLESS_PROFILE_READY_TIMEOUT
+        JOB.add_log(
+            "INFO",
+            "Waiting for profile",
+            "Headless cloud mode: waiting for a public profile grid. Manual login is not available.",
+        )
+    else:
+        timeout_ms = LOGIN_READY_TIMEOUT
+        JOB.add_log("INFO", "Waiting for profile", "Log in in the opened browser if Instagram asks.")
 
-    deadline = time.time() + (LOGIN_READY_TIMEOUT / 1000)
+    deadline = time.time() + (timeout_ms / 1000)
     while time.time() < deadline:
         if JOB.should_cancel():
             raise ScrapeCancelled("Cancelled while waiting for Instagram login/profile.")
@@ -311,7 +321,10 @@ def wait_for_profile_after_login(page) -> None:
         except Exception:
             continue
     else:
-        raise TimeoutError("Instagram profile grid did not become visible before timeout.")
+        raise TimeoutError(
+            "Instagram profile grid did not become visible. The profile may require login, "
+            "Instagram may be blocking the cloud server, or the page loaded too slowly."
+        )
 
     JOB.add_log("SUCCESS", "Profile detected", "Post grid is visible; scraping can continue.")
 

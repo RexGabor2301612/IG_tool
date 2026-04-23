@@ -85,7 +85,23 @@ document.addEventListener("DOMContentLoaded", function () {
             headers: { "Content-Type": "application/json" },
             ...options,
         });
-        const data = await response.json();
+        const contentType = response.headers.get("content-type") || "";
+        let data;
+
+        if (contentType.includes("application/json")) {
+            data = await response.json();
+        } else {
+            const text = await response.text();
+            const message = response.ok
+                ? "The server returned a non-JSON response."
+                : `The server returned ${response.status}. The app may still be starting, restarting, or timed out.`;
+            data = {
+                ok: false,
+                errors: [message],
+                raw: text.slice(0, 300),
+            };
+        }
+
         if (!response.ok) {
             const error = new Error((data.errors || ["Request failed"]).join("\n"));
             error.payload = data;
