@@ -229,11 +229,13 @@ document.addEventListener("DOMContentLoaded", function () {
         browserModeDescription.textContent = modeNote;
         browserSessionUrlText.textContent = currentUrl || "-";
 
-        if (data.status === "preparing" || data.status === "loading_session") {
-            browserSessionStatusText.textContent = "Browser session created. Checking Facebook login state.";
+        if (data.status === "loading_session") {
+            browserSessionStatusText.textContent = "Checking saved Facebook session and page access.";
+        } else if (data.status === "preparing") {
+            browserSessionStatusText.textContent = "Browser session created. Opening Facebook target.";
         } else if (data.status === "waiting_verification" || data.verificationRequired) {
             browserSessionStatusText.textContent = data.localBrowserWindow
-                ? "Facebook verification required"
+                ? "Verification required. Complete it manually in Chromium."
                 : "Facebook verification required, but this environment has no local browser window.";
         } else if (data.status === "waiting_login") {
             browserSessionStatusText.textContent = data.localBrowserWindow
@@ -257,10 +259,12 @@ document.addEventListener("DOMContentLoaded", function () {
             goStatusText.textContent = "Ready. Click GO / Start Extraction.";
         } else if (data.goRequested) {
             goStatusText.textContent = "GO signal sent. Starting extraction...";
-        } else if (data.status === "preparing" || data.status === "loading_session") {
+        } else if (data.status === "loading_session") {
+            goStatusText.textContent = "Checking saved session.";
+        } else if (data.status === "preparing") {
             goStatusText.textContent = "Preparing browser session.";
         } else if (data.status === "waiting_verification" || data.verificationRequired) {
-            goStatusText.textContent = "Waiting for Facebook verification.";
+            goStatusText.textContent = "Complete Facebook verification first.";
         } else if (data.status === "waiting_login") {
             goStatusText.textContent = "Waiting for Facebook login.";
         } else if (data.status === "ready") {

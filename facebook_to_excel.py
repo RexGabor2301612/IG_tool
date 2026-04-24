@@ -464,7 +464,10 @@ def save_storage_state(context, log_hook: Optional[LogHook] = None) -> None:
         return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        context.storage_state(path=str(path))
+        try:
+            context.storage_state(path=str(path), indexed_db=True)
+        except TypeError:
+            context.storage_state(path=str(path))
         emit_log(log_hook, "INFO", "Storage state saved", str(path))
     except Exception as exc:
         emit_log(log_hook, "WARN", "Session save skipped", type(exc).__name__)

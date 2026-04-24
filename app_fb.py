@@ -480,7 +480,7 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
         current_post=current_page_url(page, target_url),
     )
     JOB.add_log("WARN", "Login required", "Facebook login is required before loading posts or comments.")
-    JOB.add_log("WARN", "Waiting for login", message)
+    JOB.add_log("WARN", "Waiting for manual login", message)
     broadcast_dashboard_event("login_required", {"message": message, "url": current_page_url(page, target_url)})
 
     if not using_local_browser_window():
@@ -516,16 +516,16 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
                 current_post=current_page_url(page, target_url),
             )
             if not verification_logged:
-                JOB.add_log("WARN", "Verification checkpoint detected", checkpoint_reason)
-                JOB.add_log("WARN", "Waiting for user verification", "Please complete Facebook verification in the opened browser.")
+                JOB.add_log("WARN", "Verification required", checkpoint_reason)
+                JOB.add_log("WARN", "Waiting for user to complete verification", "Facebook verification required. Please complete it manually in the opened browser.")
                 broadcast_dashboard_event(
                     "verification_required",
-                    {"message": "Facebook verification required", "url": current_page_url(page, target_url)},
+                    {"message": "Facebook verification required. Please complete it manually in the opened browser.", "url": current_page_url(page, target_url)},
                 )
                 verification_logged = True
                 last_verification_ping = time.monotonic()
             elif time.monotonic() - last_verification_ping >= 10:
-                JOB.add_log("INFO", "Still waiting for verification", "Please complete Facebook verification in the opened browser.")
+                JOB.add_log("INFO", "Still waiting for verification", "Facebook verification is still active. Complete it manually in the opened browser.")
                 last_verification_ping = time.monotonic()
             time.sleep(0.35)
             continue
@@ -1121,10 +1121,10 @@ def go_signal():
         return jsonify({"ok": False, "errors": ["No browser session is active. Click Run / Start first."], "status": snapshot}), 409
     if snapshot.get("status") in {"waiting_login", "waiting_verification"} or snapshot.get("verificationRequired"):
         JOB.add_log("WARN", "Blocked GO", "GO was rejected because Facebook verification is still required.")
-        return jsonify({"ok": False, "errors": ["Please complete Facebook login/verification first."], "status": snapshot}), 409
+        return jsonify({"ok": False, "errors": ["Complete Facebook verification first."], "status": snapshot}), 409
     if snapshot.get("loginRequired") or not snapshot.get("pageReady"):
         JOB.add_log("WARN", "Blocked GO", "GO was rejected because Facebook login/page readiness is not complete yet.")
-        return jsonify({"ok": False, "errors": ["Please complete Facebook login/verification first."], "status": snapshot}), 409
+        return jsonify({"ok": False, "errors": ["Please finish Facebook login first."], "status": snapshot}), 409
     if snapshot.get("status") != "ready":
         JOB.add_log("WARN", "Blocked GO", f"GO was rejected because the job state is {snapshot.get('status')}.")
         return jsonify({"ok": False, "errors": ["The Facebook extractor is not ready for GO yet."], "status": snapshot}), 409
