@@ -25,6 +25,12 @@ OUTPUT_FILE = "instagram_grouped_by_month.xlsx"
 PLAYWRIGHT_STORAGE_STATE = os.getenv("PLAYWRIGHT_STORAGE_STATE", "").strip() or None
 PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").strip().lower() not in {"0", "false", "no", "off"}
 PLAYWRIGHT_AUTO_INSTALL = os.getenv("PLAYWRIGHT_AUTO_INSTALL", "true").strip().lower() not in {"0", "false", "no", "off"}
+RUNNING_ON_RENDER = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") or os.getenv("RENDER_EXTERNAL_URL"))
+HAS_LOCAL_DESKTOP = os.name == "nt" or bool(os.getenv("DISPLAY") or os.getenv("WAYLAND_DISPLAY"))
+PLAYWRIGHT_INTERACTIVE_BROWSER = os.getenv(
+    "PLAYWRIGHT_INTERACTIVE_BROWSER",
+    "true" if (HAS_LOCAL_DESKTOP and not RUNNING_ON_RENDER) else "false",
+).strip().lower() in {"1", "true", "yes", "on"}
 
 # -----------------------------------------------------------------------------
 # Instagram login credentials
@@ -99,6 +105,30 @@ LOGIN_POST_SUBMIT_TIMEOUT = 15000
 LogHook = Callable[[str, str, str], None]
 ProgressHook = Callable[[int, int, int], None]
 LiveHook = Callable[[Any, str, dict[str, Any]], None]
+
+
+def uses_local_browser_window() -> bool:
+    return PLAYWRIGHT_INTERACTIVE_BROWSER and HAS_LOCAL_DESKTOP and not RUNNING_ON_RENDER
+
+
+def preview_input_supported() -> bool:
+    # Screenshot streaming is view-only for now. Real login interaction happens in
+    # a real opened browser window when local interactive mode is available.
+    return False
+
+
+def browser_runtime_mode() -> str:
+    return "local_window" if uses_local_browser_window() else "view_only_preview"
+
+
+def browser_mode_label() -> str:
+    return "Opened Browser Window" if uses_local_browser_window() else "View Only Preview"
+
+
+def browser_mode_note() -> str:
+    if uses_local_browser_window():
+        return "A real Chromium window opens locally for Instagram login. The dashboard preview is view only."
+    return "Live Browser Preview is view only in this environment. Manual Instagram login requires a local opened browser window."
 
 
 def getenv_int(name: str, default: int) -> int:
@@ -2295,8 +2325,9 @@ def install_playwright_browsers() -> None:
 
 def launch_browser(playwright):
     """Create a cloud-safe Playwright browser/context pair."""
+    headless = False if uses_local_browser_window() else PLAYWRIGHT_HEADLESS
     launch_options = {
-        "headless": PLAYWRIGHT_HEADLESS,
+        "headless": headless,
         "args": [
             "--no-sandbox",
             "--disable-setuid-sandbox",

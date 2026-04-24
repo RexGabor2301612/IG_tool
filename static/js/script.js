@@ -34,15 +34,19 @@ document.addEventListener("DOMContentLoaded", function () {
     const livePreviewFrame = document.getElementById("livePreviewFrame");
     const previewPlaceholder = document.getElementById("previewPlaceholder");
     const previewCursor = document.getElementById("previewCursor");
+    const previewModeDescription = document.getElementById("previewModeDescription");
+    const previewModeText = document.getElementById("previewModeText");
     const previewNoteText = document.getElementById("previewNoteText");
     const previewUrlText = document.getElementById("previewUrlText");
     const previewRoundLive = document.getElementById("previewRoundLive");
     const previewPostsText = document.getElementById("previewPostsText");
+    const previewInstructionText = document.getElementById("previewInstructionText");
     const pausePreviewBtn = document.getElementById("pausePreviewBtn");
     const resumePreviewBtn = document.getElementById("resumePreviewBtn");
     const scrollUpBtn = document.getElementById("scrollUpBtn");
     const scrollDownBtn = document.getElementById("scrollDownBtn");
     const forceScrollBtn = document.getElementById("forceScrollBtn");
+    const focusBrowserBtn = document.getElementById("focusBrowserBtn");
     const capturePreviewBtn = document.getElementById("capturePreviewBtn");
     const expandPreviewBtn = document.getElementById("expandPreviewBtn");
     const previewModal = document.getElementById("previewModal");
@@ -52,6 +56,7 @@ document.addEventListener("DOMContentLoaded", function () {
     const expandedPreviewPlaceholder = document.getElementById("expandedPreviewPlaceholder");
     const expandedPreviewCursor = document.getElementById("expandedPreviewCursor");
     const expandedPreviewStatusText = document.getElementById("expandedPreviewStatusText");
+    const expandedPreviewModeText = document.getElementById("expandedPreviewModeText");
     const expandedPreviewNoteText = document.getElementById("expandedPreviewNoteText");
     const expandedPreviewUrlText = document.getElementById("expandedPreviewUrlText");
 
@@ -82,6 +87,24 @@ document.addEventListener("DOMContentLoaded", function () {
     function showMessage(message, type = "error") {
         formMessage.textContent = message || "";
         formMessage.className = `form-message ${type}`;
+    }
+
+    function previewInteractionMessage() {
+        if (latestStatus.localBrowserWindow) {
+            return "Preview is view only. Use the opened browser window to log in and interact with Instagram.";
+        }
+        return "Preview is view only in this environment. Manual login requires a local opened browser window.";
+    }
+
+    function applyBrowserMode(data) {
+        const modeLabel = data.browserModeLabel || "View Only Preview";
+        const modeNote = data.browserModeNote || previewInteractionMessage();
+        previewModeText.textContent = modeLabel;
+        expandedPreviewModeText.textContent = modeLabel;
+        previewModeDescription.textContent = modeNote;
+        previewInstructionText.textContent = modeNote;
+        previewStage.dataset.mode = data.previewInteractive ? "interactive" : "view-only";
+        expandedPreviewStage.dataset.mode = data.previewInteractive ? "interactive" : "view-only";
     }
 
     function setModalVisible(modal, visible) {
@@ -301,8 +324,10 @@ document.addEventListener("DOMContentLoaded", function () {
     function setButtonStates(data) {
         const status = data.status || "idle";
         const running = ["running", "stopping", "paused", "waiting_login"].includes(status);
-        const interactive = ["running", "paused", "waiting_login"].includes(status);
+        const controllable = ["running", "paused", "waiting_login"].includes(status);
         const paused = status === "paused";
+        const waitingLogin = status === "waiting_login";
+        const localBrowserWindow = Boolean(data.localBrowserWindow);
 
         confirmStartBtn.disabled = running;
         runStartBtn.disabled = running;
@@ -310,12 +335,13 @@ document.addEventListener("DOMContentLoaded", function () {
         downloadBtn.disabled = !data.canDownload;
         searchForm.querySelector("button[type='submit']").disabled = running;
 
-        pausePreviewBtn.disabled = !interactive || paused;
-        resumePreviewBtn.disabled = !interactive || !paused;
-        scrollUpBtn.disabled = !interactive;
-        scrollDownBtn.disabled = !interactive;
-        forceScrollBtn.disabled = !interactive;
-        capturePreviewBtn.disabled = !interactive;
+        pausePreviewBtn.disabled = !controllable || paused;
+        resumePreviewBtn.disabled = !controllable || !paused;
+        scrollUpBtn.disabled = !controllable || waitingLogin;
+        scrollDownBtn.disabled = !controllable || waitingLogin;
+        forceScrollBtn.disabled = !controllable || waitingLogin;
+        focusBrowserBtn.disabled = !controllable || !localBrowserWindow;
+        capturePreviewBtn.disabled = !controllable;
         expandPreviewBtn.disabled = false;
     }
 
@@ -340,6 +366,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
         previewRoundLive.textContent = `${currentRound} / ${totalRounds}`;
         previewPostsText.textContent = String(postsFound);
+        applyBrowserMode(latestStatus);
 
         setProgress("progressFill", "progressText", latestStatus.progress ?? 0);
         setProgress("successFill", "successText", latestStatus.successRate ?? 0);
@@ -520,8 +547,12 @@ document.addEventListener("DOMContentLoaded", function () {
                 body: JSON.stringify(confirmedPayload),
             });
             setModalVisible(confirmationModal, false);
-            showMessage("Scraping started. Use the live preview to watch progress or complete login if Instagram asks.", "success");
             renderStatus(data.status);
+            if (data.status?.localBrowserWindow) {
+                showMessage("Scraping started. A real browser window has been opened. Please log in there if Instagram asks. The dashboard preview is view only.", "success");
+            } else {
+                showMessage("Scraping started. The dashboard preview is view only in this environment.", "success");
+            }
             sendSocket({ type: "request_snapshot" });
         } catch (error) {
             showMessage(error.message);
@@ -560,6 +591,10 @@ document.addEventListener("DOMContentLoaded", function () {
 
     function handlePreviewClick(event) {
         if (!currentPreview.image) return;
+        if (!latestStatus.previewInteractive) {
+            showMessage(previewInteractionMessage(), "warn");
+            return;
+        }
 
         const stage = event.currentTarget;
         const cursor = stage === expandedPreviewStage ? expandedPreviewCursor : previewCursor;
@@ -579,6 +614,9 @@ document.addEventListener("DOMContentLoaded", function () {
     }
 
     function handlePreviewKey(event) {
+        if (!latestStatus.previewInteractive) {
+            return;
+        }
         if (!["running", "paused", "waiting_login"].includes(latestStatus.status || "")) return;
 
         const printable = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
@@ -592,6 +630,9 @@ document.addEventListener("DOMContentLoaded", function () {
     }
 
     function handlePreviewWheel(event) {
+        if (!latestStatus.previewInteractive) {
+            return;
+        }
         if (!["running", "paused", "waiting_login"].includes(latestStatus.status || "")) return;
         event.preventDefault();
         sendControl("preview_scroll", { deltaY: Math.round(event.deltaY) });
@@ -719,6 +760,9 @@ document.addEventListener("DOMContentLoaded", function () {
     forceScrollBtn.addEventListener("click", function () {
         sendControl("force_next_scroll");
     });
+    focusBrowserBtn.addEventListener("click", function () {
+        sendControl("focus_browser");
+    });
     capturePreviewBtn.addEventListener("click", function () {
         sendControl("capture_screenshot");
     });
@@ -746,6 +790,7 @@ document.addEventListener("DOMContentLoaded", function () {
     });
 
     updatePreviewFrame(currentPreview);
+    applyBrowserMode(latestStatus);
     connectSocket();
     refreshStatus();
 });

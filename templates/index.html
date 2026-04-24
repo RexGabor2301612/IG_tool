@@ -203,24 +203,29 @@
                 <div>
                     <p class="status-label">Live browser preview</p>
                     <h3>Live Browser Preview</h3>
+                    <p class="preview-mode-copy" id="previewModeDescription">View-only monitor. A real browser window is used for manual login when local interactive mode is available.</p>
                 </div>
                 <span class="preview-status" id="previewStatusText" data-state="connecting">Connecting...</span>
             </div>
 
             <div class="live-browser-grid">
                 <div class="live-browser-main">
-                    <div class="preview-stage live-browser-stage" id="previewStage" tabindex="0" aria-label="Live browser preview and interactive login area">
+                    <div class="preview-stage live-browser-stage" id="previewStage" tabindex="0" aria-label="Live browser preview monitor">
                         <img class="live-preview-image hidden" id="livePreviewFrame" alt="Live browser preview">
                         <div class="preview-placeholder" id="previewPlaceholder">Waiting for live browser preview...</div>
                         <div class="preview-cursor hidden" id="previewCursor" aria-hidden="true"></div>
                     </div>
-                    <p class="preview-tip">
-                        Click inside the preview to focus it. Mouse clicks, scrolling, and keyboard input are forwarded to the live Playwright browser while the job is active.
+                    <p class="preview-tip" id="previewInstructionText">
+                        View-only preview. If Instagram asks for login, use the opened browser window to continue.
                     </p>
                 </div>
 
                 <aside class="live-browser-sidebar">
                     <div class="preview-meta live-browser-meta">
+                        <div class="preview-meta-card">
+                            <span class="preview-meta-label">Browser Mode</span>
+                            <strong id="previewModeText">Connecting...</strong>
+                        </div>
                         <div class="preview-meta-card">
                             <span class="preview-meta-label">Preview Note</span>
                             <strong id="previewNoteText">Waiting for live browser preview.</strong>
@@ -245,6 +250,7 @@
                         <button class="preview-control-btn" type="button" id="scrollUpBtn">Scroll Up</button>
                         <button class="preview-control-btn" type="button" id="scrollDownBtn">Scroll Down</button>
                         <button class="preview-control-btn" type="button" id="forceScrollBtn">Force Scroll</button>
+                        <button class="preview-control-btn" type="button" id="focusBrowserBtn">Focus Browser</button>
                         <button class="preview-control-btn" type="button" id="capturePreviewBtn">Capture Screenshot</button>
                         <button class="preview-control-btn" type="button" id="expandPreviewBtn">Expand Preview</button>
                     </div>
@@ -312,6 +318,10 @@
             </div>
 
             <div class="preview-modal-meta">
+                <div class="preview-meta-card">
+                    <span class="preview-meta-label">Browser Mode</span>
+                    <strong id="expandedPreviewModeText">Connecting...</strong>
+                </div>
                 <div class="preview-meta-card">
                     <span class="preview-meta-label">Preview Note</span>
                     <strong id="expandedPreviewNoteText">Waiting for live browser preview.</strong>

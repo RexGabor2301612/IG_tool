@@ -2304,6 +2304,14 @@ body {
     font-size: 1.05rem;
 }
 
+.preview-mode-copy {
+    margin-top: 8px;
+    color: #94a3b8;
+    font-size: 0.78rem;
+    line-height: 1.55;
+    max-width: 52ch;
+}
+
 .preview-status {
     padding: 8px 12px;
     border-radius: 999px;
@@ -2345,6 +2353,10 @@ body {
 .preview-stage:focus-visible {
     outline: 2px solid #38bdf8;
     outline-offset: 3px;
+}
+
+.preview-stage[data-mode="view-only"] {
+    cursor: default;
 }
 
 .live-preview-image {

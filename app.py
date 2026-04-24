@@ -237,8 +237,7 @@ class ScrapeJobState:
             else:
                 success_rate = 0
             health = max(0, 100 - min(self.errors * 8, 70))
-
-            return {
+            snapshot = {
                 "status": self.status,
                 "activeTask": self.active_task,
                 "currentPost": self.current_post,
@@ -264,6 +263,7 @@ class ScrapeJobState:
             }
             if include_logs:
                 snapshot["logs"] = list(self.logs)
+            snapshot.update(browser_mode_payload())
             return snapshot
 
 
@@ -276,6 +276,34 @@ LOGIN_READY_TIMEOUT = 180000
 HEADLESS_PROFILE_READY_TIMEOUT = 45000
 PREVIEW_INTERVAL_SECONDS = 0.8
 PREVIEW_JPEG_QUALITY = 55
+
+
+def using_local_browser_window() -> bool:
+    return scraper.uses_local_browser_window()
+
+
+def preview_is_interactive() -> bool:
+    return scraper.preview_input_supported()
+
+
+def browser_mode_payload() -> dict[str, Any]:
+    return {
+        "browserMode": scraper.browser_runtime_mode(),
+        "browserModeLabel": scraper.browser_mode_label(),
+        "browserModeNote": scraper.browser_mode_note(),
+        "previewInteractive": preview_is_interactive(),
+        "localBrowserWindow": using_local_browser_window(),
+    }
+
+
+def login_wait_message() -> str:
+    if using_local_browser_window():
+        return "A browser window has been opened. Please log in to Instagram there to continue. The dashboard preview is view only."
+
+    return (
+        "Instagram login is required, but this environment only supports a view-only preview. "
+        "Run the app locally with PLAYWRIGHT_INTERACTIVE_BROWSER=true, or provide storage state / backend-only credentials."
+    )
 
 
 def broadcast_dashboard_event(event_type: str, data: dict[str, Any]) -> None:
@@ -473,6 +501,9 @@ def execute_control_command(page, command: dict[str, Any]) -> None:
         return
 
     if action == "preview_click":
+        if not preview_is_interactive():
+            emit_preview_frame(page, "Preview is view only. Use the opened browser window to log in.", force=True)
+            return
         x = int(command.get("x", 0))
         y = int(command.get("y", 0))
         page.mouse.click(x, y)
@@ -480,6 +511,9 @@ def execute_control_command(page, command: dict[str, Any]) -> None:
         return
 
     if action == "preview_key":
+        if not preview_is_interactive():
+            emit_preview_frame(page, "Preview is view only. Keyboard input must go to the opened browser window.", force=True)
+            return
         text = str(command.get("text", ""))
         key = str(command.get("key", ""))
         normalized_key = normalize_preview_key(key)
@@ -501,10 +535,21 @@ def execute_control_command(page, command: dict[str, Any]) -> None:
         return
 
     if action == "preview_scroll":
+        if not preview_is_interactive():
+            emit_preview_frame(page, "Preview is view only. Use scroll controls or the opened browser window.", force=True)
+            return
         delta_y = int(command.get("deltaY", 0))
         if delta_y:
             page.mouse.wheel(0, delta_y)
             emit_preview_frame(page, f"Preview wheel scroll ({delta_y})", force=True)
+        return
+
+    if action in {"focus_browser", "open_browser"}:
+        try:
+            page.bring_to_front()
+            emit_preview_frame(page, "Browser window focused", force=True)
+        except Exception:
+            emit_preview_frame(page, "Browser window focus requested", force=True)
         return
 
     if action == "force_next_scroll":
@@ -549,11 +594,20 @@ def pump_live_runtime(page, active_task: str, note: str, force_preview: bool = F
 
 
 def wait_for_user_login(page, context, profile_url: str) -> None:
+    message = login_wait_message()
+    if using_local_browser_window():
+        try:
+            page.bring_to_front()
+        except Exception:
+            pass
     JOB.update(status="waiting_login", active_task="Waiting for user login")
     JOB.add_log("WARN", "Login required", "Instagram login is required before scrolling can continue.")
-    JOB.add_log("WARN", "Waiting for user login", "Use the live browser preview to complete the Instagram login.")
-    broadcast_dashboard_event("login_required", {"message": "Login required. Waiting for user login.", "url": page.url or profile_url})
+    JOB.add_log("WARN", "Waiting for user login", message)
+    broadcast_dashboard_event("login_required", {"message": message, "url": page.url or profile_url})
     emit_preview_frame(page, "Waiting for user login", force=True)
+
+    if not using_local_browser_window():
+        raise RuntimeError(message)
 
     deadline = time.monotonic() + (LOGIN_READY_TIMEOUT / 1000)
     last_profile_refresh = 0.0
@@ -728,7 +782,7 @@ def wait_for_profile_after_login(page, context, profile_url: str) -> None:
         return
 
     JOB.update(active_task="Waiting for Instagram profile")
-    JOB.add_log("INFO", "Waiting for profile", "Waiting for Instagram profile grid to load in live preview.")
+    JOB.add_log("INFO", "Waiting for profile", "Waiting for Instagram profile grid to load before scrolling begins.")
     deadline = time.monotonic() + (HEADLESS_PROFILE_READY_TIMEOUT / 1000)
     while time.monotonic() < deadline:
         if JOB.should_cancel():
@@ -756,7 +810,7 @@ def wait_for_profile_after_login(page, context, profile_url: str) -> None:
 
 
 def run_scrape_job(config: WebScrapeConfig) -> None:
-    PREVIEW.reset("Launching live browser preview...")
+    PREVIEW.reset(scraper.browser_mode_note())
     CONTROL_BUS.reset()
     broadcast_preview_snapshot()
     JOB.update(
@@ -787,7 +841,22 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
             context.route("**/*", scraper.route_nonessential_resources)
 
             page = context.new_page()
-            JOB.add_log("INFO", "Browser opened", "Cloud-safe headless Playwright context started.")
+            if using_local_browser_window():
+                try:
+                    page.bring_to_front()
+                except Exception:
+                    pass
+                JOB.add_log(
+                    "INFO",
+                    "Browser opened",
+                    "A real Chromium browser window has been opened. Please log in there if Instagram asks. The dashboard preview is view only.",
+                )
+            else:
+                JOB.add_log(
+                    "INFO",
+                    "Browser opened",
+                    "Headless Playwright session started. Live Browser Preview is view only in this environment.",
+                )
             emit_preview_frame(page, "Browser started", force=True)
             if scraper.PLAYWRIGHT_STORAGE_STATE:
                 JOB.add_log("INFO", "Storage state loaded", scraper.PLAYWRIGHT_STORAGE_STATE)
@@ -1077,6 +1146,8 @@ def dashboard_socket(ws):
                 JOB.add_log("INFO", "Control received", "Forced scroll requested from the live preview.")
             elif action == "capture_screenshot":
                 JOB.add_log("INFO", "Control received", "Manual screenshot requested from the live preview.")
+            elif action == "focus_browser":
+                JOB.add_log("INFO", "Control received", "Browser focus requested from the dashboard.")
     except Exception:
         pass
     finally:
@@ -1104,7 +1175,7 @@ def start_scrape():
         return jsonify({"ok": False, "errors": ["A scraping job is already running."]}), 409
 
     JOB.reset()
-    PREVIEW.reset("Starting live browser preview...")
+    PREVIEW.reset(scraper.browser_mode_note())
     CONTROL_BUS.reset()
     broadcast_job_snapshot(include_logs=True)
     broadcast_preview_snapshot()
