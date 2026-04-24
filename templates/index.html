@@ -126,6 +126,8 @@
 
             <div class="quick-control-row">
                 <button class="control-btn start" type="button" id="runStartBtn">Run / Start</button>
+                <button class="control-btn go" type="button" id="goBtn">GO / Start Extraction</button>
+                <button class="control-btn pause" type="button" id="focusBrowserBtn">Focus Browser</button>
                 <button class="control-btn pause" type="button" id="centerShowLogsBtn">Show Logs</button>
             </div>
 
@@ -197,64 +199,36 @@
         </section>
     </main>
 
-    <section class="live-browser-shell">
-        <section class="live-browser-section">
-            <div class="preview-header">
+    <section class="browser-session-shell">
+        <section class="browser-session-panel">
+            <div class="browser-session-header">
                 <div>
-                    <p class="status-label">Live browser preview</p>
-                    <h3>Live Browser Preview</h3>
-                    <p class="preview-mode-copy" id="previewModeDescription">View-only monitor. A real browser window is used for manual login when local interactive mode is available.</p>
-                </div>
-                <span class="preview-status" id="previewStatusText" data-state="connecting">Connecting...</span>
-            </div>
-
-            <div class="live-browser-grid">
-                <div class="live-browser-main">
-                    <div class="preview-stage live-browser-stage" id="previewStage" tabindex="0" aria-label="Live browser preview monitor">
-                        <img class="live-preview-image hidden" id="livePreviewFrame" alt="Live browser preview">
-                        <div class="preview-placeholder" id="previewPlaceholder">Waiting for live browser preview...</div>
-                        <div class="preview-cursor hidden" id="previewCursor" aria-hidden="true"></div>
-                    </div>
-                    <p class="preview-tip" id="previewInstructionText">
-                        View-only preview. If Instagram asks for login, use the opened browser window to continue.
+                    <p class="status-label">Browser session</p>
+                    <h3>Manual Login &amp; GO Signal</h3>
+                    <p class="browser-session-copy" id="browserModeDescription">
+                        Click Run / Start to open Chromium. Log in there if Instagram asks, then come back and click GO / Start Extraction.
                     </p>
                 </div>
+                <span class="preview-status" id="browserModeBadge" data-state="connecting">Connecting...</span>
+            </div>
 
-                <aside class="live-browser-sidebar">
-                    <div class="preview-meta live-browser-meta">
-                        <div class="preview-meta-card">
-                            <span class="preview-meta-label">Browser Mode</span>
-                            <strong id="previewModeText">Connecting...</strong>
-                        </div>
-                        <div class="preview-meta-card">
-                            <span class="preview-meta-label">Preview Note</span>
-                            <strong id="previewNoteText">Waiting for live browser preview.</strong>
-                        </div>
-                        <div class="preview-meta-card">
-                            <span class="preview-meta-label">Browser URL</span>
-                            <strong id="previewUrlText">-</strong>
-                        </div>
-                        <div class="preview-meta-card">
-                            <span class="preview-meta-label">Scroll Round</span>
-                            <strong id="previewRoundLive">0 / 0</strong>
-                        </div>
-                        <div class="preview-meta-card">
-                            <span class="preview-meta-label">Loaded Links</span>
-                            <strong id="previewPostsText">0</strong>
-                        </div>
-                    </div>
-
-                    <div class="preview-control-row live-browser-controls">
-                        <button class="preview-control-btn primary" type="button" id="pausePreviewBtn">Pause</button>
-                        <button class="preview-control-btn" type="button" id="resumePreviewBtn">Resume</button>
-                        <button class="preview-control-btn" type="button" id="scrollUpBtn">Scroll Up</button>
-                        <button class="preview-control-btn" type="button" id="scrollDownBtn">Scroll Down</button>
-                        <button class="preview-control-btn" type="button" id="forceScrollBtn">Force Scroll</button>
-                        <button class="preview-control-btn" type="button" id="focusBrowserBtn">Focus Browser</button>
-                        <button class="preview-control-btn" type="button" id="capturePreviewBtn">Capture Screenshot</button>
-                        <button class="preview-control-btn" type="button" id="expandPreviewBtn">Expand Preview</button>
-                    </div>
-                </aside>
+            <div class="browser-session-grid">
+                <div class="browser-session-card">
+                    <span class="preview-meta-label">Browser Mode</span>
+                    <strong id="browserModeText">Connecting...</strong>
+                </div>
+                <div class="browser-session-card">
+                    <span class="preview-meta-label">Session Status</span>
+                    <strong id="browserSessionStatusText">No browser session yet.</strong>
+                </div>
+                <div class="browser-session-card">
+                    <span class="preview-meta-label">Current Page</span>
+                    <strong id="browserSessionUrlText">-</strong>
+                </div>
+                <div class="browser-session-card">
+                    <span class="preview-meta-label">Extraction Gate</span>
+                    <strong id="goStatusText">Waiting for Run / Start</strong>
+                </div>
             </div>
         </section>
     </section>
@@ -296,42 +270,6 @@
             </div>
             <div class="selected-log-card" id="selectedLogDetails">Select a log item to inspect its details.</div>
         </aside>
-    </div>
-
-    <div class="preview-modal-backdrop hidden" id="previewModal">
-        <section class="preview-modal-panel" role="dialog" aria-modal="true" aria-labelledby="previewModalTitle">
-            <div class="preview-modal-header">
-                <div>
-                    <p class="status-label">Expanded preview</p>
-                    <h3 id="previewModalTitle">Live Browser Preview</h3>
-                </div>
-                <div class="preview-modal-actions">
-                    <span class="preview-status" id="expandedPreviewStatusText" data-state="connecting">Connecting...</span>
-                    <button class="tiny-btn rose" type="button" id="closePreviewModalBtn">Close</button>
-                </div>
-            </div>
-
-            <div class="preview-modal-stage" id="expandedPreviewStage" tabindex="0" aria-label="Expanded live browser preview">
-                <img class="live-preview-image hidden" id="expandedPreviewFrame" alt="Expanded live browser preview">
-                <div class="preview-placeholder" id="expandedPreviewPlaceholder">Waiting for live browser preview...</div>
-                <div class="preview-cursor hidden" id="expandedPreviewCursor" aria-hidden="true"></div>
-            </div>
-
-            <div class="preview-modal-meta">
-                <div class="preview-meta-card">
-                    <span class="preview-meta-label">Browser Mode</span>
-                    <strong id="expandedPreviewModeText">Connecting...</strong>
-                </div>
-                <div class="preview-meta-card">
-                    <span class="preview-meta-label">Preview Note</span>
-                    <strong id="expandedPreviewNoteText">Waiting for live browser preview.</strong>
-                </div>
-                <div class="preview-meta-card">
-                    <span class="preview-meta-label">Browser URL</span>
-                    <strong id="expandedPreviewUrlText">-</strong>
-                </div>
-            </div>
-        </section>
     </div>
 
     <div class="side-drawer-backdrop hidden" id="aboutModal">

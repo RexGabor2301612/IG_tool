@@ -2655,3 +2655,157 @@ body {
         align-items: stretch;
     }
 }
+
+/* Runtime cleanup: stable logs panel + lightweight browser session panel */
+.right-stack {
+    display: grid;
+    gap: 18px;
+    align-content: start;
+    min-width: 0;
+}
+
+.logs-panel {
+    display: flex;
+    flex-direction: column;
+    height: 390px;
+    min-height: 390px;
+    max-height: 390px;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.logs-header,
+.log-tags,
+.log-action-row {
+    flex: 0 0 auto;
+}
+
+.logs-table-wrap {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.logs-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+.logs-grid {
+    width: 100%;
+    min-width: 0;
+}
+
+.logs-grid > div,
+.log-row > div {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.quick-control-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.quick-control-row .control-btn {
+    flex: 1 1 180px;
+}
+
+.control-btn.go {
+    background: linear-gradient(135deg, #10b981, #22c55e);
+    color: #052e16;
+}
+
+.browser-session-shell {
+    max-width: 1288px;
+    margin: 0 auto;
+    padding: 0 24px 36px;
+}
+
+.browser-session-panel {
+    padding: 22px 24px;
+    border-radius: 24px;
+    background: var(--dark-2);
+    color: var(--white);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 28px 50px rgba(15, 23, 42, 0.12);
+}
+
+.browser-session-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 18px;
+}
+
+.browser-session-header h3 {
+    margin-top: 8px;
+    font-size: 1.15rem;
+}
+
+.browser-session-copy {
+    margin-top: 8px;
+    max-width: 68ch;
+    color: #94a3b8;
+    font-size: 0.84rem;
+    line-height: 1.55;
+}
+
+.browser-session-grid {
+    margin-top: 16px;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.browser-session-card {
+    min-width: 0;
+    padding: 14px;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.browser-session-card strong {
+    display: block;
+    margin-top: 8px;
+    color: #ffffff;
+    font-size: 0.9rem;
+    line-height: 1.5;
+    word-break: break-word;
+}
+
+@media (max-width: 1180px) {
+    .browser-session-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 760px) {
+    .logs-panel {
+        height: 420px;
+        min-height: 420px;
+        max-height: 420px;
+    }
+
+    .quick-control-row .control-btn {
+        flex: 1 1 100%;
+    }
+
+    .browser-session-shell {
+        padding: 0 16px 28px;
+    }
+
+    .browser-session-header {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .browser-session-grid {
+        grid-template-columns: 1fr;
+    }
+}

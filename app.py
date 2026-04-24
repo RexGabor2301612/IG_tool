@@ -190,6 +190,7 @@ class ScrapeJobState:
         self.config_summary: dict[str, Any] = {}
         self.logs: list[dict[str, str]] = []
         self.cancel_requested = False
+        self.go_requested = False
         self.started_at: Optional[float] = None
         self.finished_at: Optional[float] = None
 
@@ -227,6 +228,17 @@ class ScrapeJobState:
         with self.lock:
             return self.cancel_requested
 
+    def request_go(self) -> bool:
+        with self.lock:
+            if self.status != "waiting_go" or self.go_requested:
+                return False
+            self.go_requested = True
+            return True
+
+    def should_go(self) -> bool:
+        with self.lock:
+            return self.go_requested
+
     def snapshot(self, include_logs: bool = True) -> dict[str, Any]:
         with self.lock:
             eligible_total = self.posts_in_range if self.posts_in_range > 0 else (self.posts_success + self.failed_extractions)
@@ -259,6 +271,8 @@ class ScrapeJobState:
                 "outputFile": self.output_file,
                 "config": self.config_summary,
                 "cancelRequested": self.cancel_requested,
+                "goRequested": self.go_requested,
+                "canGo": self.status == "waiting_go" and not self.go_requested,
                 "canDownload": self.status == "completed" and bool(self.output_file) and Path(self.output_file).exists(),
             }
             if include_logs:
@@ -298,10 +312,10 @@ def browser_mode_payload() -> dict[str, Any]:
 
 def login_wait_message() -> str:
     if using_local_browser_window():
-        return "A browser window has been opened. Please log in to Instagram there to continue. The dashboard preview is view only."
+        return "A browser window has been opened. Please log in to Instagram there to continue. Once login is detected, click GO / START EXTRACTION in the dashboard."
 
     return (
-        "Instagram login is required, but this environment only supports a view-only preview. "
+        "Instagram login is required, but this environment cannot open a local interactive browser window. "
         "Run the app locally with PLAYWRIGHT_INTERACTIVE_BROWSER=true, or provide storage state / backend-only credentials."
     )
 
@@ -315,9 +329,7 @@ def broadcast_job_snapshot(include_logs: bool = False) -> None:
 
 
 def broadcast_preview_snapshot() -> None:
-    preview_snapshot = PREVIEW.snapshot()
-    if preview_snapshot is not None:
-        broadcast_dashboard_event("preview", preview_snapshot)
+    return
 
 
 def empty_stats() -> list[dict[str, str]]:
@@ -343,7 +355,7 @@ def dashboard_features() -> list[dict[str, str]]:
         },
         {
             "title": "Live Activity Logs",
-            "description": "The dashboard streams browser frames, logs, and status updates in real time over WebSocket.",
+            "description": "The dashboard streams structured logs and status updates in real time while the real browser runs locally.",
             "icon": "LOG",
         },
         {
@@ -454,24 +466,7 @@ def config_to_summary(config: WebScrapeConfig) -> dict[str, str]:
 
 
 def emit_preview_frame(page, note: str, force: bool = False) -> None:
-    if page is None:
-        return
-    if not force and not PREVIEW.can_capture(PREVIEW_INTERVAL_SECONDS):
-        return
-
-    try:
-        image_bytes = page.screenshot(type="jpeg", quality=PREVIEW_JPEG_QUALITY, animations="disabled", caret="hide")
-        viewport = page.viewport_size or {"width": 1400, "height": 900}
-        payload = PREVIEW.update(
-            frame_b64=base64.b64encode(image_bytes).decode("ascii"),
-            width=int(viewport.get("width", 1400)),
-            height=int(viewport.get("height", 900)),
-            note=note,
-            url=page.url or "",
-        )
-        broadcast_dashboard_event("preview", payload)
-    except Exception:
-        pass
+    return
 
 
 def normalize_preview_key(key: str) -> Optional[str]:
@@ -643,6 +638,25 @@ def wait_for_user_login(page, context, profile_url: str) -> None:
     raise TimeoutError("Instagram login was required, but the session was not completed before timeout.")
 
 
+def wait_for_go_signal(page) -> None:
+    JOB.update(status="waiting_go", active_task="Waiting for GO signal")
+    JOB.add_log(
+        "INFO",
+        "Waiting for GO signal",
+        "Login detected and profile grid is ready. Click GO / START EXTRACTION to begin scrolling and data collection.",
+    )
+
+    while not JOB.should_go():
+        if JOB.should_cancel():
+            raise ScrapeCancelled("Cancelled while waiting for GO signal.")
+
+        drain_control_commands(page)
+        time.sleep(0.2)
+
+    JOB.update(status="running", active_task="Starting scroll collection")
+    JOB.add_log("SUCCESS", "GO signal received", "Starting scroll collection and extraction.")
+
+
 def ensure_login_ready(page, context, profile_url: str, active_task: str, delay_reason: str = "", log_check: bool = False) -> bool:
     if log_check:
         JOB.add_log("INFO", "Checking login state", f"Checking login state before {active_task.lower()}.")
@@ -759,7 +773,7 @@ def wait_for_profile_after_login(page, context, profile_url: str) -> None:
             emit_preview_frame(page, "Auto-login complete", force=True)
             return
         wait_for_user_login(page, context, profile_url)
-        JOB.add_log("INFO", "Starting scroll collection", "Login successful. Profile grid detected.")
+        JOB.add_log("SUCCESS", "Login detected", "Login successful. Profile grid detected and waiting for GO signal.")
         return
 
     if scraper.profile_ready_for_collection(page):
@@ -778,7 +792,7 @@ def wait_for_profile_after_login(page, context, profile_url: str) -> None:
         JOB.add_log("WARN", "Login required", "Instagram login form is visible.")
         JOB.add_log("WARN", "Link collection delayed because login is required", "Waiting for user login before scrolling.")
         wait_for_user_login(page, context, profile_url)
-        JOB.add_log("INFO", "Starting scroll collection", "Login successful. Profile grid detected.")
+        JOB.add_log("SUCCESS", "Login detected", "Login successful. Profile grid detected and waiting for GO signal.")
         return
 
     JOB.update(active_task="Waiting for Instagram profile")
@@ -799,7 +813,7 @@ def wait_for_profile_after_login(page, context, profile_url: str) -> None:
             JOB.add_log("WARN", "Login required", login_reason or "Instagram login is required.")
             JOB.add_log("WARN", "Link collection delayed because login is required", "Waiting for user login before scrolling.")
             wait_for_user_login(page, context, profile_url)
-            JOB.add_log("INFO", "Starting scroll collection", "Login successful. Profile grid detected.")
+            JOB.add_log("SUCCESS", "Login detected", "Login successful. Profile grid detected and waiting for GO signal.")
             return
         time.sleep(0.25)
 
@@ -810,9 +824,7 @@ def wait_for_profile_after_login(page, context, profile_url: str) -> None:
 
 
 def run_scrape_job(config: WebScrapeConfig) -> None:
-    PREVIEW.reset(scraper.browser_mode_note())
     CONTROL_BUS.reset()
-    broadcast_preview_snapshot()
     JOB.update(
         status="running",
         active_task="Opening browser",
@@ -849,21 +861,19 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                 JOB.add_log(
                     "INFO",
                     "Browser opened",
-                    "A real Chromium browser window has been opened. Please log in there if Instagram asks. The dashboard preview is view only.",
+                    "A real Chromium browser window has been opened. Please log in there if Instagram asks, then return to the dashboard and click GO / START EXTRACTION.",
                 )
             else:
                 JOB.add_log(
                     "INFO",
                     "Browser opened",
-                    "Headless Playwright session started. Live Browser Preview is view only in this environment.",
+                    "Headless Playwright session started. This environment cannot open a local interactive browser window.",
                 )
             emit_preview_frame(page, "Browser started", force=True)
             if scraper.PLAYWRIGHT_STORAGE_STATE:
                 JOB.add_log("INFO", "Storage state loaded", scraper.PLAYWRIGHT_STORAGE_STATE)
             wait_for_profile_after_login(page, context, config.profile_url)
-            JOB.update(status="running", active_task="Collecting post links")
-            emit_preview_frame(page, "Profile ready for scrolling", force=True)
-            JOB.add_log("INFO", "Starting scroll collection", "Profile grid detected. Beginning scroll collection.")
+            wait_for_go_signal(page)
 
             link_collection_started = time.perf_counter()
             links = collect_post_links_with_progress(page, config)
@@ -1104,7 +1114,6 @@ def dashboard_socket(ws):
     client = DASHBOARD_HUB.register(ws)
     try:
         client.send({"type": "snapshot", "data": JOB.snapshot(include_logs=True)})
-        client.send({"type": "preview", "data": PREVIEW.snapshot() or {}})
 
         while True:
             raw_message = ws.receive()
@@ -1119,7 +1128,6 @@ def dashboard_socket(ws):
             message_type = str(message.get("type", "")).strip()
             if message_type == "request_snapshot":
                 client.send({"type": "snapshot", "data": JOB.snapshot(include_logs=True)})
-                client.send({"type": "preview", "data": PREVIEW.snapshot() or {}})
                 continue
 
             if message_type != "control":
@@ -1142,11 +1150,7 @@ def dashboard_socket(ws):
                 continue
 
             CONTROL_BUS.push(message)
-            if action == "force_next_scroll":
-                JOB.add_log("INFO", "Control received", "Forced scroll requested from the live preview.")
-            elif action == "capture_screenshot":
-                JOB.add_log("INFO", "Control received", "Manual screenshot requested from the live preview.")
-            elif action == "focus_browser":
+            if action == "focus_browser":
                 JOB.add_log("INFO", "Control received", "Browser focus requested from the dashboard.")
     except Exception:
         pass
@@ -1175,10 +1179,8 @@ def start_scrape():
         return jsonify({"ok": False, "errors": ["A scraping job is already running."]}), 409
 
     JOB.reset()
-    PREVIEW.reset(scraper.browser_mode_note())
     CONTROL_BUS.reset()
     broadcast_job_snapshot(include_logs=True)
-    broadcast_preview_snapshot()
     JOB_THREAD = threading.Thread(target=run_scrape_job, args=(config,), daemon=True)
     JOB_THREAD.start()
 
@@ -1204,6 +1206,27 @@ def cancel_scrape():
         return jsonify({"ok": False, "errors": ["No active scraping job to cancel."], "status": JOB.snapshot()}), 409
 
     JOB.add_log("WARN", "Cancellation requested", "The scraper will stop at the next safe checkpoint.")
+    return jsonify({"ok": True, "status": JOB.snapshot()})
+
+
+@app.post("/api/go")
+def go_signal():
+    if not JOB.request_go():
+        return jsonify({"ok": False, "errors": ["The scraper is not waiting for the GO signal."], "status": JOB.snapshot()}), 409
+
+    return jsonify({"ok": True, "status": JOB.snapshot()})
+
+
+@app.post("/api/focus-browser")
+def focus_browser():
+    snapshot = JOB.snapshot()
+    if snapshot["status"] not in {"running", "waiting_login", "waiting_go", "paused"}:
+        return jsonify({"ok": False, "errors": ["No active browser session is available to focus."], "status": snapshot}), 409
+    if not snapshot.get("localBrowserWindow"):
+        return jsonify({"ok": False, "errors": ["This environment does not have a local browser window to focus."], "status": snapshot}), 409
+
+    CONTROL_BUS.push({"action": "focus_browser"})
+    JOB.add_log("INFO", "Browser focus requested", "Attempting to bring the Playwright browser window to the front.")
     return jsonify({"ok": True, "status": JOB.snapshot()})
 
 

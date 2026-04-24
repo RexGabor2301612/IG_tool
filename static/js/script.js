@@ -20,57 +20,30 @@ document.addEventListener("DOMContentLoaded", function () {
     const expandLogsBtn = document.getElementById("expandLogsBtn");
     const logsModal = document.getElementById("logsModal");
     const closeLogsModalBtn = document.getElementById("closeLogsModalBtn");
+    const modalLogsBody = document.getElementById("modalLogsBody");
+    const logsBody = document.getElementById("logsBody");
+    const selectedLogDetails = document.getElementById("selectedLogDetails");
     const downloadBtn = document.getElementById("downloadBtn");
     const cancelBtn = document.getElementById("cancelBtn");
     const runStartBtn = document.getElementById("runStartBtn");
+    const goBtn = document.getElementById("goBtn");
+    const focusBrowserBtn = document.getElementById("focusBrowserBtn");
     const showLogsBtn = document.getElementById("showLogsBtn");
     const centerShowLogsBtn = document.getElementById("centerShowLogsBtn");
     const aboutUsBtn = document.getElementById("aboutUsBtn");
     const aboutModal = document.getElementById("aboutModal");
     const closeAboutModalBtn = document.getElementById("closeAboutModalBtn");
-    const selectedLogDetails = document.getElementById("selectedLogDetails");
-    const previewStatusText = document.getElementById("previewStatusText");
-    const previewStage = document.getElementById("previewStage");
-    const livePreviewFrame = document.getElementById("livePreviewFrame");
-    const previewPlaceholder = document.getElementById("previewPlaceholder");
-    const previewCursor = document.getElementById("previewCursor");
-    const previewModeDescription = document.getElementById("previewModeDescription");
-    const previewModeText = document.getElementById("previewModeText");
-    const previewNoteText = document.getElementById("previewNoteText");
-    const previewUrlText = document.getElementById("previewUrlText");
-    const previewRoundLive = document.getElementById("previewRoundLive");
-    const previewPostsText = document.getElementById("previewPostsText");
-    const previewInstructionText = document.getElementById("previewInstructionText");
-    const pausePreviewBtn = document.getElementById("pausePreviewBtn");
-    const resumePreviewBtn = document.getElementById("resumePreviewBtn");
-    const scrollUpBtn = document.getElementById("scrollUpBtn");
-    const scrollDownBtn = document.getElementById("scrollDownBtn");
-    const forceScrollBtn = document.getElementById("forceScrollBtn");
-    const focusBrowserBtn = document.getElementById("focusBrowserBtn");
-    const capturePreviewBtn = document.getElementById("capturePreviewBtn");
-    const expandPreviewBtn = document.getElementById("expandPreviewBtn");
-    const previewModal = document.getElementById("previewModal");
-    const closePreviewModalBtn = document.getElementById("closePreviewModalBtn");
-    const expandedPreviewStage = document.getElementById("expandedPreviewStage");
-    const expandedPreviewFrame = document.getElementById("expandedPreviewFrame");
-    const expandedPreviewPlaceholder = document.getElementById("expandedPreviewPlaceholder");
-    const expandedPreviewCursor = document.getElementById("expandedPreviewCursor");
-    const expandedPreviewStatusText = document.getElementById("expandedPreviewStatusText");
-    const expandedPreviewModeText = document.getElementById("expandedPreviewModeText");
-    const expandedPreviewNoteText = document.getElementById("expandedPreviewNoteText");
-    const expandedPreviewUrlText = document.getElementById("expandedPreviewUrlText");
+    const browserModeDescription = document.getElementById("browserModeDescription");
+    const browserModeBadge = document.getElementById("browserModeBadge");
+    const browserModeText = document.getElementById("browserModeText");
+    const browserSessionStatusText = document.getElementById("browserSessionStatusText");
+    const browserSessionUrlText = document.getElementById("browserSessionUrlText");
+    const goStatusText = document.getElementById("goStatusText");
 
     let confirmedPayload = null;
     let lastValidatedConfig = null;
     let latestLogs = [];
-    let latestStatus = { status: "idle" };
-    let currentPreview = {
-        image: "",
-        width: 0,
-        height: 0,
-        note: "Waiting for live browser preview.",
-        url: "",
-    };
+    let latestStatus = { status: "idle", config: {} };
     let dashboardSocket = null;
     let reconnectTimer = null;
     let socketShouldReconnect = true;
@@ -89,22 +62,8 @@ document.addEventListener("DOMContentLoaded", function () {
         formMessage.className = `form-message ${type}`;
     }
 
-    function previewInteractionMessage() {
-        if (latestStatus.localBrowserWindow) {
-            return "Preview is view only. Use the opened browser window to log in and interact with Instagram.";
-        }
-        return "Preview is view only in this environment. Manual login requires a local opened browser window.";
-    }
-
-    function applyBrowserMode(data) {
-        const modeLabel = data.browserModeLabel || "View Only Preview";
-        const modeNote = data.browserModeNote || previewInteractionMessage();
-        previewModeText.textContent = modeLabel;
-        expandedPreviewModeText.textContent = modeLabel;
-        previewModeDescription.textContent = modeNote;
-        previewInstructionText.textContent = modeNote;
-        previewStage.dataset.mode = data.previewInteractive ? "interactive" : "view-only";
-        expandedPreviewStage.dataset.mode = data.previewInteractive ? "interactive" : "view-only";
+    function wait(ms) {
+        return new Promise((resolve) => window.setTimeout(resolve, ms));
     }
 
     function setModalVisible(modal, visible) {
@@ -119,24 +78,11 @@ document.addEventListener("DOMContentLoaded", function () {
 
     function openLogsDrawer() {
         renderLogs(latestLogs);
-        setModalVisible(logsModal, true);
+        logsModal.classList.remove("hidden");
     }
 
     function closeLogsDrawer() {
-        setModalVisible(logsModal, false);
-    }
-
-    function openPreviewModal() {
-        previewModal.classList.remove("hidden");
-        try {
-            expandedPreviewStage.focus({ preventScroll: true });
-        } catch (error) {
-            expandedPreviewStage.focus();
-        }
-    }
-
-    function closePreviewModal() {
-        previewModal.classList.add("hidden");
+        logsModal.classList.add("hidden");
     }
 
     function buildPayload() {
@@ -150,10 +96,6 @@ document.addEventListener("DOMContentLoaded", function () {
             outputFile: outputFile.value.trim(),
             overwrite: overwrite.value === "true",
         };
-    }
-
-    function wait(ms) {
-        return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
     async function fetchJson(url, options = {}) {
@@ -176,15 +118,9 @@ document.addEventListener("DOMContentLoaded", function () {
                     data = await response.json();
                 } else {
                     const text = await response.text();
-                    const transient = [502, 503, 504].includes(response.status);
-                    const message = response.ok
-                        ? "The server returned a non-JSON response."
-                        : transient
-                            ? "The server returned a temporary gateway error. The app may still be starting, restarting, or timed out."
-                            : `The server returned ${response.status}. Please refresh and try again.`;
                     data = {
                         ok: false,
-                        errors: [message],
+                        errors: [response.ok ? "The server returned a non-JSON response." : `The server returned ${response.status}.`],
                         raw: text.slice(0, 300),
                     };
                 }
@@ -220,6 +156,11 @@ document.addEventListener("DOMContentLoaded", function () {
         document.getElementById(textId).textContent = `${safeValue}%`;
     }
 
+    function setSocketState(state, label) {
+        browserModeBadge.dataset.state = state;
+        browserModeBadge.textContent = label;
+    }
+
     function renderLogRows(container, logs) {
         if (!logs || logs.length === 0) {
             container.innerHTML = `
@@ -248,8 +189,8 @@ document.addEventListener("DOMContentLoaded", function () {
 
     function renderLogs(logs) {
         latestLogs = Array.isArray(logs) ? logs.slice(0, 250) : [];
-        renderLogRows(document.getElementById("logsBody"), latestLogs);
-        renderLogRows(document.getElementById("modalLogsBody"), latestLogs);
+        renderLogRows(logsBody, latestLogs);
+        renderLogRows(modalLogsBody, latestLogs);
     }
 
     function showSelectedLog(index) {
@@ -276,112 +217,101 @@ document.addEventListener("DOMContentLoaded", function () {
         if (!sameLog(log, latestLogs[0])) {
             latestLogs.unshift(log);
             latestLogs = latestLogs.slice(0, 250);
-            renderLogRows(document.getElementById("logsBody"), latestLogs);
-            renderLogRows(document.getElementById("modalLogsBody"), latestLogs);
+            renderLogRows(logsBody, latestLogs);
+            renderLogRows(modalLogsBody, latestLogs);
         }
     }
 
-    function setSocketState(state, label) {
-        previewStatusText.dataset.state = state;
-        previewStatusText.textContent = label;
-        expandedPreviewStatusText.dataset.state = state;
-        expandedPreviewStatusText.textContent = label;
-    }
+    function applyBrowserSessionState(data) {
+        const modeLabel = data.browserModeLabel || "Browser Session";
+        const modeNote = data.browserModeNote || "Run / Start opens Chromium. Log in there, then click GO.";
+        const activeTask = data.activeTask || "Waiting for input";
+        const currentUrl = data.currentPost || data.config?.instagramLink || "-";
 
-    function renderPreviewInto(frameEl, placeholderEl, noteEl, urlEl, preview) {
-        noteEl.textContent = preview.note;
-        urlEl.textContent = preview.url || "-";
+        browserModeText.textContent = modeLabel;
+        browserModeDescription.textContent = modeNote;
+        browserSessionUrlText.textContent = currentUrl || "-";
 
-        if (preview.image) {
-            frameEl.src = `data:image/jpeg;base64,${preview.image}`;
-            frameEl.classList.remove("hidden");
-            placeholderEl.classList.add("hidden");
+        if (data.status === "waiting_login") {
+            browserSessionStatusText.textContent = data.localBrowserWindow
+                ? "Browser opened. Complete Instagram login in Chromium."
+                : "Login required, but this environment has no local browser window.";
+        } else if (data.status === "waiting_go") {
+            browserSessionStatusText.textContent = "Login detected. Waiting for your GO signal.";
+        } else if (data.status === "running") {
+            browserSessionStatusText.textContent = activeTask;
+        } else if (data.status === "completed") {
+            browserSessionStatusText.textContent = "Scraping completed. Excel is ready.";
+        } else if (data.status === "failed") {
+            browserSessionStatusText.textContent = "Scraping failed. Check activity logs.";
+        } else if (data.status === "stopped") {
+            browserSessionStatusText.textContent = "Scraping stopped.";
         } else {
-            frameEl.removeAttribute("src");
-            frameEl.classList.add("hidden");
-            placeholderEl.textContent = preview.note || "Waiting for live browser preview.";
-            placeholderEl.classList.remove("hidden");
+            browserSessionStatusText.textContent = "No browser session yet.";
         }
-    }
 
-    function updatePreviewFrame(preview) {
-        currentPreview = {
-            image: preview.image || "",
-            width: Number(preview.width) || 0,
-            height: Number(preview.height) || 0,
-            note: preview.note || "Waiting for live browser preview.",
-            url: preview.url || "",
-            updatedAt: preview.updatedAt || "",
-        };
-
-        renderPreviewInto(livePreviewFrame, previewPlaceholder, previewNoteText, previewUrlText, currentPreview);
-        renderPreviewInto(expandedPreviewFrame, expandedPreviewPlaceholder, expandedPreviewNoteText, expandedPreviewUrlText, currentPreview);
-
-        previewStage.classList.toggle("has-image", Boolean(currentPreview.image));
-        expandedPreviewStage.classList.toggle("has-image", Boolean(currentPreview.image));
+        if (data.canGo) {
+            goStatusText.textContent = "Ready. Click GO / Start Extraction.";
+        } else if (data.goRequested) {
+            goStatusText.textContent = "GO signal sent. Starting extraction...";
+        } else if (data.status === "waiting_login") {
+            goStatusText.textContent = "Waiting for login.";
+        } else if (data.status === "waiting_go") {
+            goStatusText.textContent = "Waiting for GO signal.";
+        } else if (data.status === "running") {
+            goStatusText.textContent = "Extraction in progress.";
+        } else if (data.status === "completed") {
+            goStatusText.textContent = "Extraction completed.";
+        } else {
+            goStatusText.textContent = "Waiting for Run / Start.";
+        }
     }
 
     function setButtonStates(data) {
         const status = data.status || "idle";
-        const running = ["running", "stopping", "paused", "waiting_login"].includes(status);
-        const controllable = ["running", "paused", "waiting_login"].includes(status);
-        const paused = status === "paused";
-        const waitingLogin = status === "waiting_login";
-        const localBrowserWindow = Boolean(data.localBrowserWindow);
+        const activeStatuses = ["running", "stopping", "waiting_login", "waiting_go", "paused"].includes(status);
 
-        confirmStartBtn.disabled = running;
-        runStartBtn.disabled = running;
-        cancelBtn.disabled = !running;
+        confirmStartBtn.disabled = activeStatuses;
+        runStartBtn.disabled = activeStatuses;
+        cancelBtn.disabled = !activeStatuses;
+        goBtn.disabled = !data.canGo;
+        focusBrowserBtn.disabled = !activeStatuses || !data.localBrowserWindow;
         downloadBtn.disabled = !data.canDownload;
-        searchForm.querySelector("button[type='submit']").disabled = running;
-
-        pausePreviewBtn.disabled = !controllable || paused;
-        resumePreviewBtn.disabled = !controllable || !paused;
-        scrollUpBtn.disabled = !controllable || waitingLogin;
-        scrollDownBtn.disabled = !controllable || waitingLogin;
-        forceScrollBtn.disabled = !controllable || waitingLogin;
-        focusBrowserBtn.disabled = !controllable || !localBrowserWindow;
-        capturePreviewBtn.disabled = !controllable;
-        expandPreviewBtn.disabled = false;
+        searchForm.querySelector("button[type='submit']").disabled = activeStatuses;
     }
 
     function renderStatus(data) {
-        latestStatus = data || { status: "idle" };
-        const status = latestStatus.status || "idle";
+        latestStatus = data || { status: "idle", config: {} };
         const config = latestStatus.config || {};
         const currentRound = latestStatus.currentScrollRound ?? 0;
         const totalRounds = latestStatus.totalScrollRounds ?? 0;
-        const postsFound = latestStatus.postsFound ?? 0;
 
-        document.getElementById("statPostsFound").textContent = postsFound;
+        document.getElementById("statusTitle").textContent = latestStatus.activeTask || "Waiting for input";
+        document.getElementById("statusBadge").textContent = latestStatus.status || "idle";
+        document.getElementById("statusBadge").dataset.status = latestStatus.status || "idle";
+        document.getElementById("scrollRoundText").textContent = `Round ${currentRound} / ${totalRounds}`;
+        document.getElementById("currentPostText").textContent = latestStatus.currentPost || "None";
+        document.getElementById("outputFileText").textContent = latestStatus.outputFile || (lastValidatedConfig?.outputFile || "Not selected");
+
+        document.getElementById("statPostsFound").textContent = latestStatus.postsFound ?? 0;
         document.getElementById("statProgress").textContent = `${latestStatus.progress ?? 0}%`;
         document.getElementById("statSuccessRate").textContent = `${latestStatus.successRate ?? 0}%`;
         document.getElementById("statErrors").textContent = latestStatus.errors ?? 0;
-
-        document.getElementById("statusTitle").textContent = latestStatus.activeTask || "Waiting for input";
-        document.getElementById("statusBadge").textContent = status;
-        document.getElementById("statusBadge").dataset.status = status;
-        document.getElementById("scrollRoundText").textContent = `Round ${currentRound} / ${totalRounds}`;
-        document.getElementById("currentPostText").textContent = latestStatus.currentPost || "None";
-
-        previewRoundLive.textContent = `${currentRound} / ${totalRounds}`;
-        previewPostsText.textContent = String(postsFound);
-        applyBrowserMode(latestStatus);
 
         setProgress("progressFill", "progressText", latestStatus.progress ?? 0);
         setProgress("successFill", "successText", latestStatus.successRate ?? 0);
         setProgress("healthFill", "healthText", latestStatus.health ?? 100);
 
-        document.getElementById("outputFileText").textContent = latestStatus.outputFile || (lastValidatedConfig?.outputFile || "Not selected");
         document.getElementById("tagStartDate").textContent = `Date: ${config.dateCoverage || lastValidatedConfig?.dateCoverage || "-"}`;
         document.getElementById("tagMaxScroll").textContent = `Max Scroll: ${config.scrollRounds || lastValidatedConfig?.scrollRounds || "-"}`;
         document.getElementById("tagRound").textContent = `Round: ${currentRound}`;
 
+        applyBrowserSessionState(latestStatus);
+        setButtonStates(latestStatus);
+
         if (Array.isArray(latestStatus.logs)) {
             renderLogs(latestStatus.logs);
         }
-
-        setButtonStates(latestStatus);
     }
 
     function socketUrl() {
@@ -417,25 +347,16 @@ document.addEventListener("DOMContentLoaded", function () {
             appendLiveLog(message.data);
             return;
         }
-        if (message.type === "preview") {
-            updatePreviewFrame(message.data || {});
+        if (message.type === "login_required" && message.data?.message) {
+            showMessage(message.data.message, "warn");
             return;
         }
-        if (message.type === "login_required") {
-            if (message.data?.message) showMessage(message.data.message, "warn");
-            return;
-        }
-        if (message.type === "login_completed") {
-            if (message.data?.message) showMessage(message.data.message, "success");
+        if (message.type === "login_completed" && message.data?.message) {
+            showMessage(message.data.message, "success");
             return;
         }
         if (message.type === "job_completed") {
             showMessage("Scraping completed. The Excel file is ready to download.", "success");
-            return;
-        }
-        if (message.type === "scroll_update" && message.data) {
-            previewRoundLive.textContent = `${message.data.round ?? 0} / ${message.data.totalRounds ?? 0}`;
-            previewPostsText.textContent = String(message.data.postsFound ?? 0);
         }
     }
 
@@ -504,7 +425,7 @@ document.addEventListener("DOMContentLoaded", function () {
         } catch (error) {
             confirmStartBtn.focus();
         }
-        showMessage("Setup validated. Confirm to start scraping.", "success");
+        showMessage("Setup validated. Confirm to open the browser and prepare scraping.", "success");
     }
 
     async function validateSetup() {
@@ -549,13 +470,35 @@ document.addEventListener("DOMContentLoaded", function () {
             setModalVisible(confirmationModal, false);
             renderStatus(data.status);
             if (data.status?.localBrowserWindow) {
-                showMessage("Scraping started. A real browser window has been opened. Please log in there if Instagram asks. The dashboard preview is view only.", "success");
+                showMessage("Browser opened. Log in to Instagram there if needed. The scraper will wait for your GO signal before scrolling.", "success");
             } else {
-                showMessage("Scraping started. The dashboard preview is view only in this environment.", "success");
+                showMessage("Scraping started. This environment has no local browser window, so login must come from stored session state or backend login support.", "warn");
             }
             sendSocket({ type: "request_snapshot" });
         } catch (error) {
             showMessage(error.message);
+        }
+    }
+
+    async function sendGoSignal() {
+        try {
+            const data = await fetchJson("/api/go", { method: "POST" });
+            renderStatus(data.status);
+            showMessage("GO signal received. Starting extraction now.", "success");
+        } catch (error) {
+            showMessage(error.message, "warn");
+            if (error.payload?.status) renderStatus(error.payload.status);
+        }
+    }
+
+    async function focusBrowser() {
+        try {
+            const data = await fetchJson("/api/focus-browser", { method: "POST" });
+            renderStatus(data.status);
+            showMessage("Browser focus requested.", "success");
+        } catch (error) {
+            showMessage(error.message, "warn");
+            if (error.payload?.status) renderStatus(error.payload.status);
         }
     }
 
@@ -570,74 +513,6 @@ document.addEventListener("DOMContentLoaded", function () {
         }
     }
 
-    function sendControl(action, extra = {}) {
-        if (!sendSocket({ type: "control", action, ...extra })) {
-            showMessage("Live controls are unavailable until the dashboard reconnects.", "warn");
-        }
-    }
-
-    function showPreviewCursor(cursorEl, stageEl, x, y) {
-        if (!cursorEl || !stageEl) return;
-        cursorEl.style.left = `${x}px`;
-        cursorEl.style.top = `${y}px`;
-        cursorEl.classList.remove("hidden");
-        cursorEl.classList.add("visible");
-        window.clearTimeout(cursorEl._hideTimer);
-        cursorEl._hideTimer = window.setTimeout(function () {
-            cursorEl.classList.remove("visible");
-            cursorEl.classList.add("hidden");
-        }, 850);
-    }
-
-    function handlePreviewClick(event) {
-        if (!currentPreview.image) return;
-        if (!latestStatus.previewInteractive) {
-            showMessage(previewInteractionMessage(), "warn");
-            return;
-        }
-
-        const stage = event.currentTarget;
-        const cursor = stage === expandedPreviewStage ? expandedPreviewCursor : previewCursor;
-        const rect = stage.getBoundingClientRect();
-        if (!rect.width || !rect.height) return;
-
-        const relativeX = event.clientX - rect.left;
-        const relativeY = event.clientY - rect.top;
-        const sourceWidth = currentPreview.width || livePreviewFrame.naturalWidth || rect.width;
-        const sourceHeight = currentPreview.height || livePreviewFrame.naturalHeight || rect.height;
-        const x = Math.max(0, Math.round(relativeX * sourceWidth / rect.width));
-        const y = Math.max(0, Math.round(relativeY * sourceHeight / rect.height));
-
-        showPreviewCursor(cursor, stage, relativeX, relativeY);
-        stage.focus();
-        sendControl("preview_click", { x, y });
-    }
-
-    function handlePreviewKey(event) {
-        if (!latestStatus.previewInteractive) {
-            return;
-        }
-        if (!["running", "paused", "waiting_login"].includes(latestStatus.status || "")) return;
-
-        const printable = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
-        const payload = {
-            key: event.key,
-            text: printable ? event.key : "",
-        };
-
-        event.preventDefault();
-        sendControl("preview_key", payload);
-    }
-
-    function handlePreviewWheel(event) {
-        if (!latestStatus.previewInteractive) {
-            return;
-        }
-        if (!["running", "paused", "waiting_login"].includes(latestStatus.status || "")) return;
-        event.preventDefault();
-        sendControl("preview_scroll", { deltaY: Math.round(event.deltaY) });
-    }
-
     searchForm.addEventListener("submit", function (event) {
         event.preventDefault();
         validateSetup();
@@ -645,6 +520,9 @@ document.addEventListener("DOMContentLoaded", function () {
 
     confirmStartBtn.addEventListener("click", startScrape);
     runStartBtn.addEventListener("click", startScrape);
+    goBtn.addEventListener("click", sendGoSignal);
+    focusBrowserBtn.addEventListener("click", focusBrowser);
+
     editConfigBtn.addEventListener("click", function () {
         setModalVisible(confirmationModal, false);
         confirmedPayload = null;
@@ -684,16 +562,19 @@ document.addEventListener("DOMContentLoaded", function () {
     showLogsBtn.addEventListener("click", openLogsDrawer);
     centerShowLogsBtn.addEventListener("click", openLogsDrawer);
     closeLogsModalBtn.addEventListener("click", closeLogsDrawer);
+
     logsModal.addEventListener("click", function (event) {
         if (event.target === logsModal) closeLogsDrawer();
     });
-    document.getElementById("modalLogsBody").addEventListener("click", function (event) {
+
+    modalLogsBody.addEventListener("click", function (event) {
         const row = event.target.closest(".log-item");
         if (row && row.dataset.logIndex !== "-1") {
             showSelectedLog(row.dataset.logIndex);
         }
     });
-    document.getElementById("logsBody").addEventListener("click", function (event) {
+
+    logsBody.addEventListener("click", function (event) {
         const row = event.target.closest(".log-item");
         if (row && row.dataset.logIndex !== "-1") {
             showSelectedLog(row.dataset.logIndex);
@@ -714,19 +595,6 @@ document.addEventListener("DOMContentLoaded", function () {
     aboutModal.addEventListener("click", function (event) {
         if (event.target === aboutModal) setModalVisible(aboutModal, false);
     });
-    expandPreviewBtn.addEventListener("click", openPreviewModal);
-    closePreviewModalBtn.addEventListener("click", closePreviewModal);
-    previewModal.addEventListener("click", function (event) {
-        if (event.target === previewModal) closePreviewModal();
-    });
-
-    document.addEventListener("keydown", function (event) {
-        if (event.key !== "Escape") return;
-        if (!logsModal.classList.contains("hidden")) closeLogsDrawer();
-        if (!aboutModal.classList.contains("hidden")) setModalVisible(aboutModal, false);
-        if (!confirmationModal.classList.contains("hidden")) setModalVisible(confirmationModal, false);
-        if (!previewModal.classList.contains("hidden")) closePreviewModal();
-    });
 
     clearLogsBtn.addEventListener("click", async function () {
         try {
@@ -745,34 +613,12 @@ document.addEventListener("DOMContentLoaded", function () {
 
     cancelBtn.addEventListener("click", cancelScrape);
 
-    pausePreviewBtn.addEventListener("click", function () {
-        sendControl("pause");
+    document.addEventListener("keydown", function (event) {
+        if (event.key !== "Escape") return;
+        if (!logsModal.classList.contains("hidden")) closeLogsDrawer();
+        if (!aboutModal.classList.contains("hidden")) setModalVisible(aboutModal, false);
+        if (!confirmationModal.classList.contains("hidden")) setModalVisible(confirmationModal, false);
     });
-    resumePreviewBtn.addEventListener("click", function () {
-        sendControl("resume");
-    });
-    scrollUpBtn.addEventListener("click", function () {
-        sendControl("scroll_up");
-    });
-    scrollDownBtn.addEventListener("click", function () {
-        sendControl("scroll_down");
-    });
-    forceScrollBtn.addEventListener("click", function () {
-        sendControl("force_next_scroll");
-    });
-    focusBrowserBtn.addEventListener("click", function () {
-        sendControl("focus_browser");
-    });
-    capturePreviewBtn.addEventListener("click", function () {
-        sendControl("capture_screenshot");
-    });
-
-    previewStage.addEventListener("click", handlePreviewClick);
-    previewStage.addEventListener("keydown", handlePreviewKey);
-    previewStage.addEventListener("wheel", handlePreviewWheel, { passive: false });
-    expandedPreviewStage.addEventListener("click", handlePreviewClick);
-    expandedPreviewStage.addEventListener("keydown", handlePreviewKey);
-    expandedPreviewStage.addEventListener("wheel", handlePreviewWheel, { passive: false });
 
     window.addEventListener("beforeunload", function () {
         socketShouldReconnect = false;
@@ -789,8 +635,6 @@ document.addEventListener("DOMContentLoaded", function () {
         }
     });
 
-    updatePreviewFrame(currentPreview);
-    applyBrowserMode(latestStatus);
     connectSocket();
     refreshStatus();
 });

@@ -127,8 +127,8 @@ def browser_mode_label() -> str:
 
 def browser_mode_note() -> str:
     if uses_local_browser_window():
-        return "A real Chromium window opens locally for Instagram login. The dashboard preview is view only."
-    return "Live Browser Preview is view only in this environment. Manual Instagram login requires a local opened browser window."
+        return "A real Chromium window opens locally for Instagram login. Use the dashboard browser session panel to monitor progress."
+    return "This environment cannot open a local Chromium window. Manual Instagram login requires a local run with PLAYWRIGHT_INTERACTIVE_BROWSER=true."
 
 
 def getenv_int(name: str, default: int) -> int:
