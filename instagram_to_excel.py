@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -79,6 +79,7 @@ SLOW_POST_SECONDS = 4.0
 LOGIN_FORM_TIMEOUT = 12000
 LOGIN_POST_SUBMIT_TIMEOUT = 15000
 LogHook = Callable[[str, str, str], None]
+ProgressHook = Callable[[int, int, int], None]
 
 
 @dataclass
@@ -107,6 +108,16 @@ def emit_log(log_hook: Optional[LogHook], level: str, action: str, details: str 
 
     try:
         log_hook(level, action, details)
+    except Exception:
+        pass
+
+
+def emit_progress(progress_hook: Optional[ProgressHook], scroll_round: int, total_rounds: int, posts_found: int) -> None:
+    if progress_hook is None:
+        return
+
+    try:
+        progress_hook(scroll_round, total_rounds, posts_found)
     except Exception:
         pass
 
@@ -167,6 +178,96 @@ def wait_for_more_profile_links(page, previous_count: int, timeout_ms: int = SCR
         return True
     except Exception:
         return False
+
+
+def get_profile_scroll_state(page) -> dict[str, int | bool]:
+    return page.evaluate(
+        """() => {
+            const doc = document.scrollingElement || document.documentElement;
+            const unique = new Set(
+                Array.from(document.querySelectorAll("a[href*='/p/'], a[href*='/reel/']"))
+                    .map(anchor => (anchor.href || "").split("?")[0])
+                    .filter(Boolean)
+            );
+            const scrollTop = Number(doc.scrollTop || window.pageYOffset || 0);
+            const scrollHeight = Number(Math.max(
+                doc.scrollHeight || 0,
+                document.body ? document.body.scrollHeight : 0
+            ));
+            const viewportHeight = Number(window.innerHeight || doc.clientHeight || 0);
+            return {
+                linkCount: unique.size,
+                scrollTop,
+                scrollHeight,
+                viewportHeight,
+                atBottom: scrollTop + viewportHeight >= scrollHeight - 16,
+            };
+        }"""
+    )
+
+
+def advance_profile_grid(page) -> dict[str, int | bool]:
+    return page.evaluate(
+        """() => {
+            const doc = document.scrollingElement || document.documentElement;
+            const anchors = Array.from(document.querySelectorAll("a[href*='/p/'], a[href*='/reel/']"));
+            if (anchors.length) {
+                anchors[anchors.length - 1].scrollIntoView({ block: 'end', inline: 'nearest' });
+            }
+
+            const beforeTop = Number(doc.scrollTop || window.pageYOffset || 0);
+            const step = Math.max(Math.floor((window.innerHeight || 900) * 0.9), 900);
+            window.scrollBy(0, step);
+
+            const afterScrollTop = Number(doc.scrollTop || window.pageYOffset || 0);
+            if (afterScrollTop <= beforeTop + 5) {
+                window.scrollTo(0, Math.max(doc.scrollHeight || 0, document.body ? document.body.scrollHeight : 0));
+            }
+
+            return {
+                scrollTop: Number(doc.scrollTop || window.pageYOffset || 0),
+                scrollHeight: Number(Math.max(
+                    doc.scrollHeight || 0,
+                    document.body ? document.body.scrollHeight : 0
+                )),
+            };
+        }"""
+    )
+
+
+def wait_for_profile_dom_growth(
+    page,
+    previous_state: dict[str, int | bool],
+    timeout_ms: int = SCROLL_WAIT_TIMEOUT,
+) -> dict[str, int | bool]:
+    try:
+        page.wait_for_function(
+            """(prev) => {
+                const doc = document.scrollingElement || document.documentElement;
+                const unique = new Set(
+                    Array.from(document.querySelectorAll("a[href*='/p/'], a[href*='/reel/']"))
+                        .map(anchor => (anchor.href || "").split("?")[0])
+                        .filter(Boolean)
+                );
+                const scrollTop = Number(doc.scrollTop || window.pageYOffset || 0);
+                const scrollHeight = Number(Math.max(
+                    doc.scrollHeight || 0,
+                    document.body ? document.body.scrollHeight : 0
+                ));
+
+                return (
+                    unique.size > prev.linkCount ||
+                    scrollHeight > prev.scrollHeight + 24 ||
+                    scrollTop > prev.scrollTop + 24
+                );
+            }""",
+            arg=previous_state,
+            timeout=timeout_ms,
+        )
+    except Exception:
+        pass
+
+    return get_profile_scroll_state(page)
 
 
 def click_button_if_visible(page, pattern: str, timeout_ms: int = 1200) -> bool:
@@ -1120,20 +1221,44 @@ def extract_date(page) -> tuple[str, Optional[datetime]]:
         return "", None
 
 
-def collect_post_links(page, max_posts: Optional[int] = None, scroll_rounds: int = MAX_SCROLL_ROUNDS) -> List[str]:
+def collect_post_links(
+    page,
+    max_posts: Optional[int] = None,
+    scroll_rounds: int = MAX_SCROLL_ROUNDS,
+    log_hook: Optional[LogHook] = None,
+    progress_hook: Optional[ProgressHook] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> List[str]:
     links = {}  # Use dict instead of set to preserve insertion order (Python 3.7+)
     stagnant = 0
 
     wait_for_profile_ready(page)
     print(f"Starting collection: max_rounds={scroll_rounds}, stagnant_limit={MAX_STAGNANT_ROUNDS}")
 
-    for scroll_round in range(scroll_rounds):
+    initial_found = collect_visible_post_links(page)
+    for href in initial_found:
+        if href and href not in links:
+            links[href] = True
+
+    if links:
+        print(f"  Initial grid: +{len(links)} links (total={len(links)})")
+        emit_log(log_hook, "INFO", "Initial grid", f"+{len(links)} new links (total={len(links)}).")
+    emit_progress(progress_hook, 0, scroll_rounds, len(links))
+
+    for scroll_round in range(1, scroll_rounds + 1):
+        if cancel_check is not None and cancel_check():
+            raise RuntimeError("Cancelled during profile scrolling.")
+
         round_started = time.perf_counter()
+        previous_state = get_profile_scroll_state(page)
+
         try:
-            wait_for_selector(page, PROFILE_GRID_SELECTOR, PROFILE_LINK_WAIT_TIMEOUT)
+            advance_profile_grid(page)
+            current_state = wait_for_profile_dom_growth(page, previous_state, SCROLL_WAIT_TIMEOUT)
             found = collect_visible_post_links(page)
         except Exception:
-            print(f"  Scroll {scroll_round + 1}: Failed to find links")
+            print(f"  Scroll {scroll_round}: Failed to find links")
+            emit_log(log_hook, "WARN", f"Scroll {scroll_round}", "Failed to inspect profile grid after scrolling.")
             page.wait_for_timeout(PROFILE_RETRY_MS)
             continue
 
@@ -1145,30 +1270,52 @@ def collect_post_links(page, max_posts: Optional[int] = None, scroll_rounds: int
                     links[clean_url] = True  # Add to dict to preserve order
 
         new_count = len(links) - before
-        if new_count == 0:
-            stagnant += 1
-            print(f"  Scroll {scroll_round + 1}: No new links (stagnant={stagnant}/{MAX_STAGNANT_ROUNDS}, total={len(links)})")
-        else:
+        dom_changed = (
+            current_state["linkCount"] > previous_state["linkCount"] or
+            current_state["scrollHeight"] > previous_state["scrollHeight"] + 24 or
+            current_state["scrollTop"] > previous_state["scrollTop"] + 24
+        )
+
+        if new_count > 0:
             stagnant = 0
-            print(f"  Scroll {scroll_round + 1}: +{new_count} links (total={len(links)})")
+            print(f"  Scroll {scroll_round}: +{new_count} new links (total={len(links)})")
+            emit_log(log_hook, "INFO", f"Scroll {scroll_round}", f"+{new_count} new links (total={len(links)}).")
+        else:
+            if dom_changed:
+                stagnant = 0
+                print(f"  Scroll {scroll_round}: +0 new links but content moved (total={len(links)})")
+                emit_log(
+                    log_hook,
+                    "INFO",
+                    f"Scroll {scroll_round}",
+                    f"+0 new links; content moved (height={current_state['scrollHeight']}, top={current_state['scrollTop']}).",
+                )
+            else:
+                stagnant += 1
+                print(f"  Scroll {scroll_round}: +0 (stagnant {stagnant}/{MAX_STAGNANT_ROUNDS}, total={len(links)})")
+                emit_log(
+                    log_hook,
+                    "INFO",
+                    f"Scroll {scroll_round}",
+                    f"+0 new links (stagnant {stagnant}/{MAX_STAGNANT_ROUNDS}, total={len(links)}).",
+                )
+
+        emit_progress(progress_hook, scroll_round, scroll_rounds, len(links))
 
         if max_posts is not None and len(links) >= max_posts:
             print(f"Reached max_posts limit: {max_posts}")
+            emit_log(log_hook, "INFO", "Link collection stopped", f"Reached max_posts limit: {max_posts}.")
             break
 
         if stagnant >= MAX_STAGNANT_ROUNDS:
             print(f"Stopping: {MAX_STAGNANT_ROUNDS} stagnant rounds reached")
+            emit_log(log_hook, "INFO", "Link collection stopped", "No new links after repeated scrolls.")
             break
-
-        prev_count = len(links)
-        page.mouse.wheel(0, 4000)
-
-        if not wait_for_more_profile_links(page, prev_count, SCROLL_WAIT_TIMEOUT):
-            page.wait_for_timeout(SCROLL_FALLBACK_MS)
 
         elapsed = time.perf_counter() - round_started
         if elapsed >= SLOW_SCROLL_SECONDS:
-            print(f"  Scroll {scroll_round + 1}: Slow round ({elapsed:.2f}s)")
+            print(f"  Scroll {scroll_round}: Slow round ({elapsed:.2f}s)")
+            emit_log(log_hook, "WARN", "Slow scroll", f"Round {scroll_round} took {elapsed:.2f}s.")
 
     print(f"Collection complete: {len(links)} unique links found\n")
     return list(links.keys())[:max_posts]  # Convert dict keys to list in insertion order

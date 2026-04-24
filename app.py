@@ -234,60 +234,30 @@ def config_to_summary(config: WebScrapeConfig) -> dict[str, str]:
 
 
 def collect_post_links_with_progress(page, config: WebScrapeConfig) -> list[str]:
-    links: dict[str, bool] = {}
-    stagnant = 0
-
-    scraper.wait_for_profile_ready(page)
     JOB.update(active_task="Collecting post links", total_scroll_rounds=config.scroll_rounds)
     JOB.add_log("INFO", "Profile ready", "Starting profile grid scan.")
+    def progress_hook(scroll_round: int, total_rounds: int, posts_found: int) -> None:
+        progress_value = 0 if scroll_round <= 0 else min(20, round(20 * scroll_round / max(total_rounds, 1)))
+        JOB.update(
+            current_scroll_round=scroll_round,
+            total_scroll_rounds=total_rounds,
+            posts_found=posts_found,
+            progress=progress_value,
+        )
 
-    for scroll_round in range(1, config.scroll_rounds + 1):
-        if JOB.should_cancel():
-            raise ScrapeCancelled("Cancelled during profile scrolling.")
-
-        JOB.update(current_scroll_round=scroll_round, active_task="Collecting post links")
-        round_started = time.perf_counter()
-
-        try:
-            scraper.wait_for_selector(page, scraper.PROFILE_GRID_SELECTOR, scraper.PROFILE_LINK_WAIT_TIMEOUT)
-            found = scraper.collect_visible_post_links(page)
-        except Exception as exc:
-            JOB.update(errors=JOB.snapshot()["errors"] + 1)
-            JOB.add_log("WARN", f"Scroll round {scroll_round} failed", type(exc).__name__)
-            page.wait_for_timeout(scraper.PROFILE_RETRY_MS)
-            continue
-
-        before = len(links)
-        for href in found:
-            if href:
-                clean_url = href.split("?")[0]
-                if clean_url not in links:
-                    links[clean_url] = True
-
-        new_count = len(links) - before
-        JOB.update(posts_found=len(links), progress=min(20, round(20 * scroll_round / config.scroll_rounds)))
-
-        if new_count:
-            stagnant = 0
-            JOB.add_log("INFO", f"Scroll round {scroll_round}", f"+{new_count} links, total {len(links)}.")
-        else:
-            stagnant += 1
-            JOB.add_log("INFO", f"Scroll round {scroll_round}", f"No new links ({stagnant}/{scraper.MAX_STAGNANT_ROUNDS}).")
-
-        if stagnant >= scraper.MAX_STAGNANT_ROUNDS:
-            JOB.add_log("INFO", "Link collection stopped", "No new links after repeated scrolls.")
-            break
-
-        prev_count = len(links)
-        page.mouse.wheel(0, 4000)
-        if not scraper.wait_for_more_profile_links(page, prev_count, scraper.SCROLL_WAIT_TIMEOUT):
-            page.wait_for_timeout(scraper.SCROLL_FALLBACK_MS)
-
-        elapsed = time.perf_counter() - round_started
-        if elapsed >= scraper.SLOW_SCROLL_SECONDS:
-            JOB.add_log("WARN", "Slow scroll", f"Round {scroll_round} took {elapsed:.2f}s.")
-
-    return list(links.keys())
+    try:
+        return scraper.collect_post_links(
+            page,
+            max_posts=None,
+            scroll_rounds=config.scroll_rounds,
+            log_hook=JOB.add_log,
+            progress_hook=progress_hook,
+            cancel_check=JOB.should_cancel,
+        )
+    except RuntimeError as exc:
+        if "Cancelled during profile scrolling." in str(exc):
+            raise ScrapeCancelled(str(exc)) from exc
+        raise
 
 
 def wait_for_profile_after_login(page, context, profile_url: str) -> None:
