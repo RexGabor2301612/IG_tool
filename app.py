@@ -353,6 +353,26 @@ def sync_browser_url(page, fallback: str = "") -> None:
     JOB.update(browser_url=current_page_url(page, fallback))
 
 
+def local_login_still_required(page) -> bool:
+    """Detect logged-out profile states when running with a real local browser window."""
+    if not using_local_browser_window():
+        return False
+
+    selectors = [
+        "a[href*='/accounts/login']",
+        "a:has-text('Log in')",
+        "a:has-text('Log In')",
+    ]
+    for selector in selectors:
+        try:
+            if page.locator(selector).first.count() > 0:
+                return True
+        except Exception:
+            continue
+
+    return False
+
+
 def mark_browser_ready(page, profile_url: str, *, waiting_for_go: bool) -> None:
     browser_url = current_page_url(page, profile_url)
     JOB.update(
@@ -672,6 +692,7 @@ def wait_for_user_login(page, context, profile_url: str, *, waiting_for_go: bool
     login_form_logged = False
     login_page_opened = False
     returned_to_profile_after_login = False
+    logged_out_hint_logged = False
     while time.monotonic() < deadline:
         if JOB.should_cancel():
             raise ScrapeCancelled("Cancelled while waiting for user login.")
@@ -681,7 +702,10 @@ def wait_for_user_login(page, context, profile_url: str, *, waiting_for_go: bool
         sync_browser_url(page, profile_url)
         emit_preview_frame(page, "Waiting for user login")
 
-        if scraper.profile_ready_for_collection(page):
+        profile_ready = scraper.profile_ready_for_collection(page)
+        still_logged_out = local_login_still_required(page)
+
+        if profile_ready and not still_logged_out:
             scraper.save_storage_state(context, JOB.add_log)
             mark_browser_ready(page, profile_url, waiting_for_go=waiting_for_go)
             JOB.add_log(
@@ -697,6 +721,22 @@ def wait_for_user_login(page, context, profile_url: str, *, waiting_for_go: bool
             broadcast_dashboard_event("login_completed", {"message": "Login completed. Profile grid detected.", "url": current_page_url(page, profile_url)})
             emit_preview_frame(page, "Login complete", force=True)
             return
+
+        if profile_ready and still_logged_out:
+            JOB.update(login_required=True, profile_ready=False, ready_to_scrape=False, browser_url=current_page_url(page, profile_url))
+            if not logged_out_hint_logged:
+                JOB.add_log("WARN", "Still logged out", "Profile is visible but the Instagram Log in link is still present.")
+                logged_out_hint_logged = True
+            if not login_page_opened:
+                try:
+                    JOB.add_log("INFO", "Opening Instagram login form", "Navigating the current browser tab to Instagram's login page for manual sign-in.")
+                    open_login_form_in_same_tab(page)
+                    sync_browser_url(page, profile_url)
+                    login_page_opened = True
+                except Exception as exc:
+                    JOB.add_log("WARN", "Login form navigation failed", f"{type(exc).__name__}")
+            time.sleep(0.3)
+            continue
 
         login_required, login_reason = scraper.detect_login_gate(page)
         login_form_visible = scraper.wait_for_selector(page, scraper.LOGIN_FORM_SELECTOR, 200)
@@ -899,6 +939,11 @@ def wait_until_profile_ready_or_login_completed(page, context, profile_url: str)
         return
 
     if scraper.profile_ready_for_collection(page):
+        if local_login_still_required(page):
+            JOB.add_log("WARN", "Login required", "Profile is visible, but Instagram still shows a Log in prompt.")
+            JOB.add_log("WARN", "Link collection delayed because login is required", "Waiting for user login before scrolling.")
+            wait_for_user_login(page, context, profile_url, waiting_for_go=True)
+            return
         mark_browser_ready(page, profile_url, waiting_for_go=True)
         JOB.add_log("SUCCESS", "Profile detected", "Post grid is visible; scraping can continue.")
         JOB.add_log("INFO", "Profile grid detected", "Profile grid is visible and ready for collection.")
@@ -930,6 +975,11 @@ def wait_until_profile_ready_or_login_completed(page, context, profile_url: str)
         pump_live_runtime(page, "Waiting for Instagram profile", "Waiting for Instagram profile")
         sync_browser_url(page, profile_url)
         if scraper.profile_ready_for_collection(page):
+            if local_login_still_required(page):
+                JOB.add_log("WARN", "Login required", "Profile is visible, but Instagram still shows a Log in prompt.")
+                JOB.add_log("WARN", "Link collection delayed because login is required", "Waiting for user login before scrolling.")
+                wait_for_user_login(page, context, profile_url, waiting_for_go=True)
+                return
             mark_browser_ready(page, profile_url, waiting_for_go=True)
             JOB.add_log("SUCCESS", "Profile detected", "Post grid is visible; scraping can continue.")
             JOB.add_log("INFO", "Profile grid detected", "Profile grid is visible and ready for collection.")

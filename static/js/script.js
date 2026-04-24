@@ -239,7 +239,7 @@ document.addEventListener("DOMContentLoaded", function () {
                 ? "Browser opened. Complete Instagram login in Chromium."
                 : "Login required, but this environment has no local browser window.";
         } else if (data.status === "ready") {
-            browserSessionStatusText.textContent = "Login completed. Ready to start extraction.";
+            browserSessionStatusText.textContent = "Profile ready. Click GO / Start Extraction.";
         } else if (data.status === "running") {
             browserSessionStatusText.textContent = activeTask;
         } else if (data.status === "completed") {
@@ -261,7 +261,7 @@ document.addEventListener("DOMContentLoaded", function () {
         } else if (data.status === "waiting_login") {
             goStatusText.textContent = "Waiting for Instagram login.";
         } else if (data.status === "ready") {
-            goStatusText.textContent = "Login completed. Waiting for GO signal.";
+            goStatusText.textContent = "Profile ready. Waiting for GO signal.";
         } else if (data.status === "running") {
             goStatusText.textContent = "Extraction in progress.";
         } else if (data.status === "completed") {
