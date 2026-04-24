@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
@@ -25,8 +25,25 @@ OUTPUT_FILE = "instagram_grouped_by_month.xlsx"
 PLAYWRIGHT_STORAGE_STATE = os.getenv("PLAYWRIGHT_STORAGE_STATE", "").strip() or None
 PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").strip().lower() not in {"0", "false", "no", "off"}
 PLAYWRIGHT_AUTO_INSTALL = os.getenv("PLAYWRIGHT_AUTO_INSTALL", "true").strip().lower() not in {"0", "false", "no", "off"}
-INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME", "").strip()
-INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD", "").strip()
+
+# -----------------------------------------------------------------------------
+# Instagram login credentials
+# Prefer environment variables in production / cloud deployments:
+#   INSTAGRAM_USERNAME
+#   INSTAGRAM_PASSWORD
+#
+# PUT TEST ACCOUNT LOGIN DETAILS HERE only if you intentionally need a local
+# development fallback and you understand the security tradeoff. Keep them
+# backend-only and never expose them to HTML, CSS, or JavaScript.
+#
+# Example local-only fallback:
+# TEST_INSTAGRAM_USERNAME = ""
+# TEST_INSTAGRAM_PASSWORD = ""
+# -----------------------------------------------------------------------------
+TEST_INSTAGRAM_USERNAME = ""
+TEST_INSTAGRAM_PASSWORD = ""
+INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME", "").strip() or TEST_INSTAGRAM_USERNAME.strip()
+INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD", "").strip() or TEST_INSTAGRAM_PASSWORD.strip()
 # Only collect posts from this date onwards (Instagram shows newest first, so older posts appear later in scroll).
 START_DATE = datetime(2026, 1, 1)
 # Set to None to collect every discoverable post link during the crawl window.
@@ -1388,6 +1405,7 @@ def collect_post_links(
     links = {}  # Use dict instead of set to preserve insertion order (Python 3.7+)
     stagnant = 0
     no_more_posts_proof = 0
+    stopped_early = False
     stagnant_limit = get_effective_stagnant_limit(scroll_rounds)
     min_rounds_before_stop = get_minimum_rounds_before_stop(scroll_rounds, stagnant_limit)
     proof_rounds_required = SCROLL_STOP_PROOF_ROUNDS
@@ -1560,6 +1578,7 @@ def collect_post_links(
         if max_posts is not None and len(links) >= max_posts:
             print(f"Reached max_posts limit: {max_posts}")
             emit_log(log_hook, "INFO", "Link collection stopped", f"Reached max_posts limit: {max_posts}.")
+            stopped_early = True
             break
 
         if (
@@ -1577,12 +1596,21 @@ def collect_post_links(
                 "Link collection stopped",
                 f"Reached strong end-of-profile proof after {scroll_round} rounds (stagnant={stagnant}, proof={no_more_posts_proof}).",
             )
+            stopped_early = True
             break
 
         elapsed = time.perf_counter() - round_started
         if elapsed >= SLOW_SCROLL_SECONDS:
             print(f"  Scroll {scroll_round}: Slow round ({elapsed:.2f}s)")
             emit_log(log_hook, "WARN", "Slow scroll", f"Round {scroll_round} took {elapsed:.2f}s.")
+
+    if not stopped_early and scroll_rounds > 0:
+        emit_log(
+            log_hook,
+            "INFO",
+            "Link collection stopped",
+            f"Reached max scroll rounds ({scroll_rounds}) with {len(links)} unique links collected.",
+        )
 
     print(f"Collection complete: {len(links)} unique links found\n")
     return list(links.keys())[:max_posts]  # Convert dict keys to list in insertion order
@@ -1751,6 +1779,37 @@ def save_grouped_excel(posts: List[PostData], filename: str, coverage_label: str
     ws.column_dimensions["D"].width = 18
     ws.column_dimensions["E"].width = 15
     ws.column_dimensions["F"].width = 15
+
+    wb.save(filename)
+
+
+def save_empty_result_excel(
+    filename: str,
+    coverage_label: str,
+    total_links_collected: int,
+    oldest_detected: Optional[datetime],
+    newest_detected: Optional[datetime],
+    reason: str,
+) -> None:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Instagram Data 2026"
+
+    ws["A1"] = coverage_label
+    ws["A2"] = "No posts found within selected date range."
+    ws["A4"] = "Selected date coverage"
+    ws["B4"] = coverage_label
+    ws["A5"] = "Total links collected"
+    ws["B5"] = str(total_links_collected)
+    ws["A6"] = "Newest detected post"
+    ws["B6"] = newest_detected.strftime(DATE_INPUT_FORMAT) if newest_detected else "Unknown"
+    ws["A7"] = "Oldest detected post"
+    ws["B7"] = oldest_detected.strftime(DATE_INPUT_FORMAT) if oldest_detected else "Unknown"
+    ws["A8"] = "Reason"
+    ws["B8"] = reason
+
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["B"].width = 90
 
     wb.save(filename)
 

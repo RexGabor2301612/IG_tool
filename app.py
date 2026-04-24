@@ -490,11 +490,26 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                 JOB.add_log("INFO", "Date filter applied", f"Filtered out {removed_count} posts outside selected coverage.")
 
             JOB.update(active_task="Saving Excel file", progress=95)
-            scraper.save_grouped_excel(
-                filtered_posts,
-                config.output_file,
-                scraper.format_date_coverage(config.start_date, config.end_date),
-            )
+            coverage_label = scraper.format_date_coverage(config.start_date, config.end_date)
+            if filtered_posts:
+                scraper.save_grouped_excel(
+                    filtered_posts,
+                    config.output_file,
+                    coverage_label,
+                )
+            else:
+                empty_reason = (
+                    "No collected posts fell within the selected date coverage after validating post dates."
+                )
+                scraper.save_empty_result_excel(
+                    config.output_file,
+                    coverage_label,
+                    total_links_collected=len(links),
+                    oldest_detected=oldest_post_seen,
+                    newest_detected=newest_post_seen,
+                    reason=empty_reason,
+                )
+                JOB.add_log("WARN", "No posts matched range", empty_reason)
             JOB.add_log("SUCCESS", "Excel saved", config.output_file)
             JOB.update(status="completed", active_task="Completed", progress=100, finished_at=time.time())
     except ScrapeCancelled as exc:
