@@ -276,7 +276,19 @@ def detect_checkpoint_or_verification(page) -> tuple[bool, str]:
     except Exception:
         current_url = ""
 
-    if any(token in current_url for token in ["/checkpoint/", "/checkpoint", "/login/identify", "/two_step_verification"]):
+    if any(
+        token in current_url
+        for token in [
+            "/checkpoint/",
+            "/checkpoint",
+            "/login/identify",
+            "/two_step_verification",
+            "/authentication/",
+            "/authentication?",
+            "/captcha/",
+            "recaptcha",
+        ]
+    ):
         return True, "Facebook checkpoint or verification page detected."
 
     try:
@@ -294,6 +306,11 @@ def detect_checkpoint_or_verification(page) -> tuple[bool, str]:
         "checkpoint",
         "verify your account",
         "review recent login",
+        "recaptcha",
+        "captcha",
+        "google's recaptcha enterprise",
+        "protect the security of your account",
+        "authentication required",
     ]
     if any(phrase in body_text for phrase in challenge_phrases):
         return True, "Facebook requires verification before the page can be used."

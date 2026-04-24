@@ -406,6 +406,11 @@ button {
     color: #fde68a;
 }
 
+.status-running[data-status="waiting_verification"] {
+    background: rgba(249, 115, 22, 0.18);
+    color: #fdba74;
+}
+
 .status-running[data-status="ready"],
 .status-running[data-status="completed"],
 .preview-status[data-state="connected"] {

@@ -231,16 +231,14 @@ document.addEventListener("DOMContentLoaded", function () {
 
         if (data.status === "preparing") {
             browserSessionStatusText.textContent = "Browser session created. Checking Facebook login state.";
+        } else if (data.status === "waiting_verification" || data.verificationRequired) {
+            browserSessionStatusText.textContent = data.localBrowserWindow
+                ? "Facebook requires verification. Complete it in Chromium before extraction can continue."
+                : "Facebook requires verification, but this environment has no local browser window.";
         } else if (data.status === "waiting_login") {
-            if ((data.activeTask || "").toLowerCase().includes("verification")) {
-                browserSessionStatusText.textContent = data.localBrowserWindow
-                    ? "Facebook requires verification. Complete it in Chromium before extraction can continue."
-                    : "Facebook requires verification, but this environment has no local browser window.";
-            } else {
-                browserSessionStatusText.textContent = data.localBrowserWindow
-                    ? "Browser opened. Complete Facebook login in Chromium."
-                    : "Facebook login is required, but this environment has no local browser window.";
-            }
+            browserSessionStatusText.textContent = data.localBrowserWindow
+                ? "Browser opened. Complete Facebook login in Chromium."
+                : "Facebook login is required, but this environment has no local browser window.";
         } else if (data.status === "ready") {
             browserSessionStatusText.textContent = "Facebook page ready. Click GO / Start Extraction.";
         } else if (data.status === "running") {
@@ -261,10 +259,10 @@ document.addEventListener("DOMContentLoaded", function () {
             goStatusText.textContent = "GO signal sent. Starting extraction...";
         } else if (data.status === "preparing") {
             goStatusText.textContent = "Preparing browser session.";
+        } else if (data.status === "waiting_verification" || data.verificationRequired) {
+            goStatusText.textContent = "Waiting for Facebook verification.";
         } else if (data.status === "waiting_login") {
-            goStatusText.textContent = (data.activeTask || "").toLowerCase().includes("verification")
-                ? "Waiting for Facebook verification."
-                : "Waiting for Facebook login.";
+            goStatusText.textContent = "Waiting for Facebook login.";
         } else if (data.status === "ready") {
             goStatusText.textContent = "Facebook page ready. Waiting for GO signal.";
         } else if (data.status === "running") {
@@ -278,7 +276,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
     function setButtonStates(data) {
         const status = data.status || "idle";
-        const activeStatuses = ["preparing", "running", "stopping", "waiting_login", "ready", "paused"].includes(status);
+        const activeStatuses = ["preparing", "running", "stopping", "waiting_login", "waiting_verification", "ready", "paused"].includes(status);
 
         confirmStartBtn.disabled = activeStatuses;
         runStartBtn.disabled = activeStatuses;
@@ -357,6 +355,10 @@ document.addEventListener("DOMContentLoaded", function () {
             return;
         }
         if (message.type === "login_required" && message.data?.message) {
+            showMessage(message.data.message, "warn");
+            return;
+        }
+        if (message.type === "verification_required" && message.data?.message) {
             showMessage(message.data.message, "warn");
             return;
         }
