@@ -33,15 +33,27 @@ document.addEventListener("DOMContentLoaded", function () {
     const previewStage = document.getElementById("previewStage");
     const livePreviewFrame = document.getElementById("livePreviewFrame");
     const previewPlaceholder = document.getElementById("previewPlaceholder");
+    const previewCursor = document.getElementById("previewCursor");
     const previewNoteText = document.getElementById("previewNoteText");
     const previewUrlText = document.getElementById("previewUrlText");
     const previewRoundLive = document.getElementById("previewRoundLive");
     const previewPostsText = document.getElementById("previewPostsText");
-    const pauseResumeBtn = document.getElementById("pauseResumeBtn");
+    const pausePreviewBtn = document.getElementById("pausePreviewBtn");
+    const resumePreviewBtn = document.getElementById("resumePreviewBtn");
     const scrollUpBtn = document.getElementById("scrollUpBtn");
     const scrollDownBtn = document.getElementById("scrollDownBtn");
     const forceScrollBtn = document.getElementById("forceScrollBtn");
     const capturePreviewBtn = document.getElementById("capturePreviewBtn");
+    const expandPreviewBtn = document.getElementById("expandPreviewBtn");
+    const previewModal = document.getElementById("previewModal");
+    const closePreviewModalBtn = document.getElementById("closePreviewModalBtn");
+    const expandedPreviewStage = document.getElementById("expandedPreviewStage");
+    const expandedPreviewFrame = document.getElementById("expandedPreviewFrame");
+    const expandedPreviewPlaceholder = document.getElementById("expandedPreviewPlaceholder");
+    const expandedPreviewCursor = document.getElementById("expandedPreviewCursor");
+    const expandedPreviewStatusText = document.getElementById("expandedPreviewStatusText");
+    const expandedPreviewNoteText = document.getElementById("expandedPreviewNoteText");
+    const expandedPreviewUrlText = document.getElementById("expandedPreviewUrlText");
 
     let confirmedPayload = null;
     let lastValidatedConfig = null;
@@ -89,6 +101,19 @@ document.addEventListener("DOMContentLoaded", function () {
 
     function closeLogsDrawer() {
         setModalVisible(logsModal, false);
+    }
+
+    function openPreviewModal() {
+        previewModal.classList.remove("hidden");
+        try {
+            expandedPreviewStage.focus({ preventScroll: true });
+        } catch (error) {
+            expandedPreviewStage.focus();
+        }
+    }
+
+    function closePreviewModal() {
+        previewModal.classList.add("hidden");
     }
 
     function buildPayload() {
@@ -236,6 +261,24 @@ document.addEventListener("DOMContentLoaded", function () {
     function setSocketState(state, label) {
         previewStatusText.dataset.state = state;
         previewStatusText.textContent = label;
+        expandedPreviewStatusText.dataset.state = state;
+        expandedPreviewStatusText.textContent = label;
+    }
+
+    function renderPreviewInto(frameEl, placeholderEl, noteEl, urlEl, preview) {
+        noteEl.textContent = preview.note;
+        urlEl.textContent = preview.url || "-";
+
+        if (preview.image) {
+            frameEl.src = `data:image/jpeg;base64,${preview.image}`;
+            frameEl.classList.remove("hidden");
+            placeholderEl.classList.add("hidden");
+        } else {
+            frameEl.removeAttribute("src");
+            frameEl.classList.add("hidden");
+            placeholderEl.textContent = preview.note || "Waiting for live browser preview.";
+            placeholderEl.classList.remove("hidden");
+        }
     }
 
     function updatePreviewFrame(preview) {
@@ -248,27 +291,18 @@ document.addEventListener("DOMContentLoaded", function () {
             updatedAt: preview.updatedAt || "",
         };
 
-        previewNoteText.textContent = currentPreview.note;
-        previewUrlText.textContent = currentPreview.url || "-";
+        renderPreviewInto(livePreviewFrame, previewPlaceholder, previewNoteText, previewUrlText, currentPreview);
+        renderPreviewInto(expandedPreviewFrame, expandedPreviewPlaceholder, expandedPreviewNoteText, expandedPreviewUrlText, currentPreview);
 
-        if (currentPreview.image) {
-            livePreviewFrame.src = `data:image/jpeg;base64,${currentPreview.image}`;
-            livePreviewFrame.classList.remove("hidden");
-            previewPlaceholder.classList.add("hidden");
-            previewStage.classList.add("has-image");
-        } else {
-            livePreviewFrame.removeAttribute("src");
-            livePreviewFrame.classList.add("hidden");
-            previewPlaceholder.textContent = currentPreview.note || "Waiting for live browser preview.";
-            previewPlaceholder.classList.remove("hidden");
-            previewStage.classList.remove("has-image");
-        }
+        previewStage.classList.toggle("has-image", Boolean(currentPreview.image));
+        expandedPreviewStage.classList.toggle("has-image", Boolean(currentPreview.image));
     }
 
     function setButtonStates(data) {
         const status = data.status || "idle";
         const running = ["running", "stopping", "paused", "waiting_login"].includes(status);
         const interactive = ["running", "paused", "waiting_login"].includes(status);
+        const paused = status === "paused";
 
         confirmStartBtn.disabled = running;
         runStartBtn.disabled = running;
@@ -276,12 +310,13 @@ document.addEventListener("DOMContentLoaded", function () {
         downloadBtn.disabled = !data.canDownload;
         searchForm.querySelector("button[type='submit']").disabled = running;
 
-        pauseResumeBtn.disabled = !interactive;
-        pauseResumeBtn.textContent = status === "paused" ? "Resume" : "Pause";
+        pausePreviewBtn.disabled = !interactive || paused;
+        resumePreviewBtn.disabled = !interactive || !paused;
         scrollUpBtn.disabled = !interactive;
         scrollDownBtn.disabled = !interactive;
         forceScrollBtn.disabled = !interactive;
         capturePreviewBtn.disabled = !interactive;
+        expandPreviewBtn.disabled = false;
     }
 
     function renderStatus(data) {
@@ -357,6 +392,23 @@ document.addEventListener("DOMContentLoaded", function () {
         }
         if (message.type === "preview") {
             updatePreviewFrame(message.data || {});
+            return;
+        }
+        if (message.type === "login_required") {
+            if (message.data?.message) showMessage(message.data.message, "warn");
+            return;
+        }
+        if (message.type === "login_completed") {
+            if (message.data?.message) showMessage(message.data.message, "success");
+            return;
+        }
+        if (message.type === "job_completed") {
+            showMessage("Scraping completed. The Excel file is ready to download.", "success");
+            return;
+        }
+        if (message.type === "scroll_update" && message.data) {
+            previewRoundLive.textContent = `${message.data.round ?? 0} / ${message.data.totalRounds ?? 0}`;
+            previewPostsText.textContent = String(message.data.postsFound ?? 0);
         }
     }
 
@@ -493,10 +545,25 @@ document.addEventListener("DOMContentLoaded", function () {
         }
     }
 
+    function showPreviewCursor(cursorEl, stageEl, x, y) {
+        if (!cursorEl || !stageEl) return;
+        cursorEl.style.left = `${x}px`;
+        cursorEl.style.top = `${y}px`;
+        cursorEl.classList.remove("hidden");
+        cursorEl.classList.add("visible");
+        window.clearTimeout(cursorEl._hideTimer);
+        cursorEl._hideTimer = window.setTimeout(function () {
+            cursorEl.classList.remove("visible");
+            cursorEl.classList.add("hidden");
+        }, 850);
+    }
+
     function handlePreviewClick(event) {
         if (!currentPreview.image) return;
 
-        const rect = previewStage.getBoundingClientRect();
+        const stage = event.currentTarget;
+        const cursor = stage === expandedPreviewStage ? expandedPreviewCursor : previewCursor;
+        const rect = stage.getBoundingClientRect();
         if (!rect.width || !rect.height) return;
 
         const relativeX = event.clientX - rect.left;
@@ -506,7 +573,8 @@ document.addEventListener("DOMContentLoaded", function () {
         const x = Math.max(0, Math.round(relativeX * sourceWidth / rect.width));
         const y = Math.max(0, Math.round(relativeY * sourceHeight / rect.height));
 
-        previewStage.focus();
+        showPreviewCursor(cursor, stage, relativeX, relativeY);
+        stage.focus();
         sendControl("preview_click", { x, y });
     }
 
@@ -521,6 +589,12 @@ document.addEventListener("DOMContentLoaded", function () {
 
         event.preventDefault();
         sendControl("preview_key", payload);
+    }
+
+    function handlePreviewWheel(event) {
+        if (!["running", "paused", "waiting_login"].includes(latestStatus.status || "")) return;
+        event.preventDefault();
+        sendControl("preview_scroll", { deltaY: Math.round(event.deltaY) });
     }
 
     searchForm.addEventListener("submit", function (event) {
@@ -599,12 +673,18 @@ document.addEventListener("DOMContentLoaded", function () {
     aboutModal.addEventListener("click", function (event) {
         if (event.target === aboutModal) setModalVisible(aboutModal, false);
     });
+    expandPreviewBtn.addEventListener("click", openPreviewModal);
+    closePreviewModalBtn.addEventListener("click", closePreviewModal);
+    previewModal.addEventListener("click", function (event) {
+        if (event.target === previewModal) closePreviewModal();
+    });
 
     document.addEventListener("keydown", function (event) {
         if (event.key !== "Escape") return;
         if (!logsModal.classList.contains("hidden")) closeLogsDrawer();
         if (!aboutModal.classList.contains("hidden")) setModalVisible(aboutModal, false);
         if (!confirmationModal.classList.contains("hidden")) setModalVisible(confirmationModal, false);
+        if (!previewModal.classList.contains("hidden")) closePreviewModal();
     });
 
     clearLogsBtn.addEventListener("click", async function () {
@@ -624,12 +704,11 @@ document.addEventListener("DOMContentLoaded", function () {
 
     cancelBtn.addEventListener("click", cancelScrape);
 
-    pauseResumeBtn.addEventListener("click", function () {
-        if ((latestStatus.status || "") === "paused") {
-            sendControl("resume");
-        } else {
-            sendControl("pause");
-        }
+    pausePreviewBtn.addEventListener("click", function () {
+        sendControl("pause");
+    });
+    resumePreviewBtn.addEventListener("click", function () {
+        sendControl("resume");
     });
     scrollUpBtn.addEventListener("click", function () {
         sendControl("scroll_up");
@@ -646,6 +725,10 @@ document.addEventListener("DOMContentLoaded", function () {
 
     previewStage.addEventListener("click", handlePreviewClick);
     previewStage.addEventListener("keydown", handlePreviewKey);
+    previewStage.addEventListener("wheel", handlePreviewWheel, { passive: false });
+    expandedPreviewStage.addEventListener("click", handlePreviewClick);
+    expandedPreviewStage.addEventListener("keydown", handlePreviewKey);
+    expandedPreviewStage.addEventListener("wheel", handlePreviewWheel, { passive: false });
 
     window.addEventListener("beforeunload", function () {
         socketShouldReconnect = false;

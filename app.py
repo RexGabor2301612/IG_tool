@@ -500,6 +500,13 @@ def execute_control_command(page, command: dict[str, Any]) -> None:
         emit_preview_frame(page, "Manual scroll down", force=True)
         return
 
+    if action == "preview_scroll":
+        delta_y = int(command.get("deltaY", 0))
+        if delta_y:
+            page.mouse.wheel(0, delta_y)
+            emit_preview_frame(page, f"Preview wheel scroll ({delta_y})", force=True)
+        return
+
     if action == "force_next_scroll":
         page.mouse.wheel(0, 2200)
         emit_preview_frame(page, "Forced scroll", force=True)
@@ -543,7 +550,9 @@ def pump_live_runtime(page, active_task: str, note: str, force_preview: bool = F
 
 def wait_for_user_login(page, context, profile_url: str) -> None:
     JOB.update(status="waiting_login", active_task="Waiting for user login")
-    JOB.add_log("WARN", "Waiting for user login", "Instagram login is required. Use the live preview to sign in.")
+    JOB.add_log("WARN", "Login required", "Instagram login is required before scrolling can continue.")
+    JOB.add_log("WARN", "Waiting for user login", "Use the live browser preview to complete the Instagram login.")
+    broadcast_dashboard_event("login_required", {"message": "Login required. Waiting for user login.", "url": page.url or profile_url})
     emit_preview_frame(page, "Waiting for user login", force=True)
 
     deadline = time.monotonic() + (LOGIN_READY_TIMEOUT / 1000)
@@ -556,10 +565,12 @@ def wait_for_user_login(page, context, profile_url: str) -> None:
         drain_control_commands(page)
         emit_preview_frame(page, "Waiting for user login")
 
-        if scraper.wait_for_selector(page, scraper.PROFILE_GRID_SELECTOR, 400):
+        if scraper.profile_ready_for_collection(page):
             scraper.save_storage_state(context, JOB.add_log)
             JOB.update(status="running", active_task="Profile ready")
-            JOB.add_log("SUCCESS", "User login detected", "Profile grid is visible; scraping will resume.")
+            JOB.add_log("SUCCESS", "Login completed", "Profile grid is visible; scraping will resume.")
+            JOB.add_log("SUCCESS", "Profile grid detected", "Profile grid is visible after login.")
+            broadcast_dashboard_event("login_completed", {"message": "Login completed. Profile grid detected.", "url": page.url or profile_url})
             emit_preview_frame(page, "Login complete", force=True)
             return
 
@@ -578,9 +589,25 @@ def wait_for_user_login(page, context, profile_url: str) -> None:
     raise TimeoutError("Instagram login was required, but the session was not completed before timeout.")
 
 
+def ensure_login_ready(page, context, profile_url: str, active_task: str, delay_reason: str = "", log_check: bool = False) -> bool:
+    if log_check:
+        JOB.add_log("INFO", "Checking login state", f"Checking login state before {active_task.lower()}.")
+    login_required, reason = scraper.detect_login_gate(page)
+    if not login_required:
+        return False
+
+    JOB.add_log("WARN", "Login required", reason or "Instagram login is required.")
+    if delay_reason:
+        JOB.add_log("WARN", "Link collection delayed because login is required", delay_reason)
+    wait_for_user_login(page, context, profile_url)
+    JOB.add_log("INFO", "Resuming scroll after login", "Profile grid detected. Resuming automated collection.")
+    emit_preview_frame(page, "Resuming after login", force=True)
+    return True
+
+
 def collect_post_links_with_progress(page, config: WebScrapeConfig) -> list[str]:
     JOB.update(active_task="Collecting post links", total_scroll_rounds=config.scroll_rounds)
-    JOB.add_log("INFO", "Profile ready", "Starting profile grid scan.")
+    JOB.add_log("INFO", "Starting scroll collection", "Profile grid detected. Beginning scroll collection.")
 
     def progress_hook(scroll_round: int, total_rounds: int, posts_found: int) -> None:
         progress_value = 0 if scroll_round <= 0 else min(20, round(20 * scroll_round / max(total_rounds, 1)))
@@ -590,8 +617,20 @@ def collect_post_links_with_progress(page, config: WebScrapeConfig) -> list[str]
             posts_found=posts_found,
             progress=progress_value,
         )
+        broadcast_dashboard_event(
+            "scroll_update",
+            {"round": scroll_round, "totalRounds": total_rounds, "postsFound": posts_found},
+        )
 
     def live_hook(runtime_page, phase: str, payload: dict[str, Any]) -> None:
+        if ensure_login_ready(
+            runtime_page,
+            runtime_page.context,
+            config.profile_url,
+            "Collecting post links",
+            "Waiting for login before scroll collection can continue.",
+        ):
+            JOB.add_log("INFO", "Post links loaded after login", f"Continuing scroll collection after login; current visible links: {payload.get('totalLinks', 0)}.")
         round_text = payload.get("round")
         note = {
             "initial-grid": f"Initial grid loaded: {payload.get('totalLinks', 0)} links",
@@ -651,22 +690,41 @@ def wait_for_profile_after_login(page, context, profile_url: str) -> None:
     JOB.update(active_task="Opening Instagram profile")
     page.goto(profile_url, wait_until="domcontentloaded", timeout=scraper.POST_GOTO_TIMEOUT)
     emit_preview_frame(page, "Profile opened", force=True)
+    JOB.add_log("INFO", "Checking login state", "Checking whether Instagram requires login before scraping.")
 
     if JOB.should_cancel():
         raise ScrapeCancelled("Cancelled while waiting for Instagram login/profile.")
 
-    if scraper.wait_for_selector(page, scraper.PROFILE_GRID_SELECTOR, min(6000, HEADLESS_PROFILE_READY_TIMEOUT)):
+    login_required, login_reason = scraper.detect_login_gate(page)
+    if login_required:
+        JOB.add_log("WARN", "Login required", login_reason or "Instagram login is required.")
+        JOB.add_log("WARN", "Link collection delayed because login is required", "Waiting for user login before scrolling.")
+        if scraper.auto_login_if_needed(page, context, profile_url, log_hook=JOB.add_log):
+            JOB.add_log("SUCCESS", "Login completed", "Automatic login restored the session.")
+            JOB.add_log("SUCCESS", "Profile grid detected", "Profile grid is visible after login.")
+            emit_preview_frame(page, "Auto-login complete", force=True)
+            return
+        wait_for_user_login(page, context, profile_url)
+        JOB.add_log("INFO", "Starting scroll collection", "Login successful. Profile grid detected.")
+        return
+
+    if scraper.profile_ready_for_collection(page):
         JOB.add_log("SUCCESS", "Profile detected", "Post grid is visible; scraping can continue.")
+        JOB.add_log("INFO", "Profile grid detected", "Profile grid is visible and ready for collection.")
         emit_preview_frame(page, "Profile grid detected", force=True)
         return
 
     if scraper.auto_login_if_needed(page, context, profile_url, log_hook=JOB.add_log):
         JOB.add_log("SUCCESS", "Profile detected", "Auto-login restored the Instagram session.")
+        JOB.add_log("SUCCESS", "Login completed", "Profile grid is visible after automatic login.")
         emit_preview_frame(page, "Auto-login complete", force=True)
         return
 
-    if scraper.wait_for_selector(page, "input[name='username'], input[name='password']", 1200):
+    if scraper.wait_for_selector(page, scraper.LOGIN_FORM_SELECTOR, 1200):
+        JOB.add_log("WARN", "Login required", "Instagram login form is visible.")
+        JOB.add_log("WARN", "Link collection delayed because login is required", "Waiting for user login before scrolling.")
         wait_for_user_login(page, context, profile_url)
+        JOB.add_log("INFO", "Starting scroll collection", "Login successful. Profile grid detected.")
         return
 
     JOB.update(active_task="Waiting for Instagram profile")
@@ -677,12 +735,17 @@ def wait_for_profile_after_login(page, context, profile_url: str) -> None:
             raise ScrapeCancelled("Cancelled while waiting for Instagram login/profile.")
 
         pump_live_runtime(page, "Waiting for Instagram profile", "Waiting for Instagram profile")
-        if scraper.wait_for_selector(page, scraper.PROFILE_GRID_SELECTOR, 400):
+        if scraper.profile_ready_for_collection(page):
             JOB.add_log("SUCCESS", "Profile detected", "Post grid is visible; scraping can continue.")
+            JOB.add_log("INFO", "Profile grid detected", "Profile grid is visible and ready for collection.")
             emit_preview_frame(page, "Profile grid detected", force=True)
             return
-        if scraper.wait_for_selector(page, "input[name='username'], input[name='password']", 300):
+        login_required, login_reason = scraper.detect_login_gate(page)
+        if login_required:
+            JOB.add_log("WARN", "Login required", login_reason or "Instagram login is required.")
+            JOB.add_log("WARN", "Link collection delayed because login is required", "Waiting for user login before scrolling.")
             wait_for_user_login(page, context, profile_url)
+            JOB.add_log("INFO", "Starting scroll collection", "Login successful. Profile grid detected.")
             return
         time.sleep(0.25)
 
@@ -731,6 +794,7 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
             wait_for_profile_after_login(page, context, config.profile_url)
             JOB.update(status="running", active_task="Collecting post links")
             emit_preview_frame(page, "Profile ready for scrolling", force=True)
+            JOB.add_log("INFO", "Starting scroll collection", "Profile grid detected. Beginning scroll collection.")
 
             link_collection_started = time.perf_counter()
             links = collect_post_links_with_progress(page, config)
@@ -924,6 +988,7 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                 )
                 JOB.add_log("WARN", "No posts matched range", empty_reason)
             JOB.add_log("SUCCESS", "Excel saved", config.output_file)
+            broadcast_dashboard_event("job_completed", JOB.snapshot(include_logs=False))
             emit_preview_frame(page, "Excel saved", force=True)
             JOB.update(status="completed", active_task="Completed", progress=100, finished_at=time.time())
     except ScrapeCancelled as exc:

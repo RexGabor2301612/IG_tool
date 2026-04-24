@@ -74,6 +74,7 @@ BODY_TEXT_TIMEOUT = 2500
 NEXT_DATA_TIMEOUT = 1800
 BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
 PROFILE_GRID_SELECTOR = "a[href*='/p/'], a[href*='/reel/']"
+LOGIN_FORM_SELECTOR = "input[name='username'], input[name='password'], form[action*='/accounts/login/']"
 POST_PRIMARY_SELECTOR = "time, article"
 METRIC_SELECTOR = "svg[aria-label*='ike'], svg[aria-label*='omment'], article [role='button'] svg"
 DATE_INPUT_FORMAT = "%Y-%m-%d"
@@ -179,6 +180,51 @@ def wait_for_selector(page, selector: str, timeout_ms: int) -> bool:
         return True
     except Exception:
         return False
+
+
+def profile_grid_visible(page, timeout_ms: int = 400) -> bool:
+    return wait_for_selector(page, PROFILE_GRID_SELECTOR, timeout_ms)
+
+
+def detect_login_gate(page) -> tuple[bool, str]:
+    if wait_for_selector(page, LOGIN_FORM_SELECTOR, 300):
+        return True, "Instagram login form detected."
+
+    gate_selectors = [
+        ("button:has-text('Log in')", "Instagram login button detected."),
+        ("button:has-text('Continue watching')", "Instagram continue-watching gate detected."),
+        ("button:has-text('Sign up')", "Instagram sign-up gate detected."),
+        ("text='Continue watching'", "Instagram continue-watching gate text detected."),
+        ("text='Log in to continue'", "Instagram login wall detected."),
+        ("text='See photos and videos'", "Instagram sign-in wall detected."),
+    ]
+    for selector, reason in gate_selectors:
+        try:
+            if page.locator(selector).first.count() > 0:
+                return True, reason
+        except Exception:
+            continue
+
+    try:
+        body_text = page.locator("body").inner_text(timeout=500).lower()
+    except Exception:
+        body_text = ""
+
+    if "continue watching" in body_text:
+        return True, "Instagram continue-watching gate detected."
+    if "log in to continue" in body_text:
+        return True, "Instagram login wall detected."
+    if "sign up to see photos and videos" in body_text:
+        return True, "Instagram sign-up wall detected."
+
+    return False, ""
+
+
+def profile_ready_for_collection(page) -> bool:
+    login_required, _ = detect_login_gate(page)
+    if login_required:
+        return False
+    return profile_grid_visible(page, 350)
 
 
 def collect_visible_post_links(page) -> List[str]:
