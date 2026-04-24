@@ -165,6 +165,23 @@ def parse_date(value: str, field_name: str) -> tuple[Optional[datetime], Optiona
         return None, f"{field_name} must use YYYY-MM-DD."
 
 
+def parse_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off", ""}:
+        return False
+
+    return default
+
+
 def validate_request_payload(payload: dict[str, Any]) -> tuple[Optional[WebScrapeConfig], list[str], bool]:
     errors: list[str] = []
     overwrite_required = False
@@ -187,7 +204,7 @@ def validate_request_payload(payload: dict[str, Any]) -> tuple[Optional[WebScrap
     if start_error:
         errors.append(start_error)
 
-    latest_mode = bool(payload.get("latestMode", True))
+    latest_mode = parse_bool(payload.get("latestMode", False), default=False)
     end_date: Optional[datetime] = None
     if not latest_mode:
         end_date, end_error = parse_date(str(payload.get("endDate", "")), "End date")
@@ -228,6 +245,9 @@ def config_to_summary(config: WebScrapeConfig) -> dict[str, str]:
     return {
         "instagramLink": config.profile_url,
         "scrollRounds": str(config.scroll_rounds),
+        "startDate": config.start_date.strftime(scraper.DATE_INPUT_FORMAT),
+        "endDate": config.end_date.strftime(scraper.DATE_INPUT_FORMAT) if config.end_date else "",
+        "latestMode": "true" if config.end_date is None else "false",
         "dateCoverage": scraper.format_date_coverage(config.start_date, config.end_date),
         "outputFile": config.output_file,
     }
@@ -298,6 +318,15 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
         finished_at=None,
     )
     JOB.add_log("INFO", "Job started", f"Output: {config.output_file}")
+    JOB.add_log(
+        "INFO",
+        "Selected date coverage",
+        (
+            f"startDate={config.start_date.strftime(scraper.DATE_INPUT_FORMAT)}, "
+            f"endDate={config.end_date.strftime(scraper.DATE_INPUT_FORMAT) if config.end_date else 'latest'}, "
+            f"latestMode={'true' if config.end_date is None else 'false'}"
+        ),
+    )
 
     browser = None
     context = None
@@ -327,6 +356,7 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
             oldest_post_seen: Optional[datetime] = None
             newest_post_seen: Optional[datetime] = None
             target_date_reached = False
+            seen_in_range_post = False
             for index, link in enumerate(links, start=1):
                 if JOB.should_cancel():
                     raise ScrapeCancelled("Cancelled during post extraction.")
@@ -342,7 +372,54 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
 
                 try:
                     post_started = time.perf_counter()
-                    post = scraper.extract_post_data(page, link, log_hook=JOB.add_log)
+                    raw_date, date_obj, post_type = scraper.open_post_for_extraction(page, link)
+                    detected_date_text = date_obj.strftime(scraper.DATE_INPUT_FORMAT) if date_obj else (raw_date or "Cannot detect")
+                    JOB.add_log("INFO", "Post date detected", f"{link} -> {detected_date_text}")
+
+                    coverage_status, coverage_reason = scraper.classify_post_date_coverage(
+                        date_obj,
+                        config.start_date,
+                        config.end_date,
+                    )
+
+                    if coverage_status == "newer_than_end":
+                        JOB.add_log("INFO", "Post skipped", coverage_reason)
+                        needs_cooldown = True
+                        JOB.update(posts_processed=index, progress=20 + round(70 * index / max(total_links, 1)))
+                        time.sleep(scraper.BASE_POST_DELAY)
+                        continue
+
+                    if coverage_status == "older_than_start":
+                        JOB.add_log("INFO", "Post skipped", coverage_reason)
+                        if seen_in_range_post:
+                            JOB.add_log(
+                                "INFO",
+                                "Reached posts older than start date",
+                                "Stopping post processing because collected links are ordered newest to oldest.",
+                            )
+                            JOB.update(posts_processed=index, progress=90)
+                            break
+                        needs_cooldown = True
+                        JOB.update(posts_processed=index, progress=20 + round(70 * index / max(total_links, 1)))
+                        time.sleep(scraper.BASE_POST_DELAY)
+                        continue
+
+                    if coverage_status == "unknown_date":
+                        JOB.add_log("WARN", "Post skipped", coverage_reason)
+                        needs_cooldown = True
+                        JOB.update(posts_processed=index, progress=20 + round(70 * index / max(total_links, 1)))
+                        time.sleep(scraper.BASE_POST_DELAY)
+                        continue
+
+                    seen_in_range_post = True
+                    post = scraper.extract_metrics_from_loaded_post(
+                        page,
+                        link,
+                        raw_date,
+                        date_obj,
+                        post_type,
+                        log_hook=JOB.add_log,
+                    )
                     post_elapsed = time.perf_counter() - post_started
                     all_posts.append(post)
 
@@ -364,6 +441,7 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                     if success:
                         snapshot = JOB.snapshot()
                         JOB.update(posts_success=snapshot["postsSuccess"] + 1)
+                        JOB.add_log("INFO", "Post included", coverage_reason)
                         JOB.add_log(
                             "SUCCESS",
                             "Extracted post",

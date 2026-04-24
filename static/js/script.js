@@ -69,12 +69,13 @@ document.addEventListener("DOMContentLoaded", function () {
     }
 
     function buildPayload() {
+        const latestModeEnabled = Boolean(latestMode.checked);
         return {
             instagramLink: instagramLink.value.trim(),
             scrollRounds: scrollRounds.value.trim(),
-            startDate: startDate.value,
-            endDate: endDate.value,
-            latestMode: latestMode.checked,
+            startDate: String(startDate.value || "").trim(),
+            endDate: latestModeEnabled ? "" : String(endDate.value || "").trim(),
+            latestMode: latestModeEnabled,
             outputFile: outputFile.value.trim(),
             overwrite: overwrite.value === "true",
         };

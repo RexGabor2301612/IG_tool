@@ -669,17 +669,31 @@ def prompt_scrape_config() -> ScrapeConfig:
 
 
 def post_matches_date_coverage(post: PostData, start_date: datetime, end_date: Optional[datetime]) -> bool:
-    """Use inclusive date coverage while keeping undated posts for manual review."""
-    if post.post_date_obj is None:
-        return True
+    """Only include posts whose detected date is within the requested range."""
+    return classify_post_date_coverage(post.post_date_obj, start_date, end_date)[0] == "in_range"
 
-    post_date = post.post_date_obj.date()
+
+def classify_post_date_coverage(
+    post_date_obj: Optional[datetime],
+    start_date: datetime,
+    end_date: Optional[datetime],
+) -> tuple[str, str]:
+    if post_date_obj is None:
+        return "unknown_date", "Skipped because the post date could not be detected reliably."
+
+    post_date = post_date_obj.date()
     if post_date < start_date.date():
-        return False
+        return "older_than_start", f"Skipped because {post_date.strftime(DATE_INPUT_FORMAT)} is older than start date {start_date.strftime(DATE_INPUT_FORMAT)}."
     if end_date is not None and post_date > end_date.date():
-        return False
+        return "newer_than_end", f"Skipped because {post_date.strftime(DATE_INPUT_FORMAT)} is newer than end date {end_date.strftime(DATE_INPUT_FORMAT)}."
 
-    return True
+    if end_date is None:
+        return "in_range", f"Included because {post_date.strftime(DATE_INPUT_FORMAT)} is on/after start date {start_date.strftime(DATE_INPUT_FORMAT)}."
+
+    return "in_range", (
+        f"Included because {post_date.strftime(DATE_INPUT_FORMAT)} is within "
+        f"{start_date.strftime(DATE_INPUT_FORMAT)} to {end_date.strftime(DATE_INPUT_FORMAT)}."
+    )
 
 
 def parse_count(value: Optional[str]) -> Optional[int]:
@@ -1315,6 +1329,53 @@ def extract_date(page) -> tuple[str, Optional[datetime]]:
         return "", None
 
 
+def open_post_for_extraction(page, url: str) -> tuple[str, Optional[datetime], str]:
+    page.goto(url, wait_until="domcontentloaded", timeout=POST_GOTO_TIMEOUT)
+    wait_for_post_ready(page, url)
+    post_type = infer_post_type_from_dom(page, url)
+    raw_date, date_obj = extract_date(page)
+    return raw_date, date_obj, post_type
+
+
+def extract_metrics_from_loaded_post(
+    page,
+    url: str,
+    raw_date: str,
+    date_obj: Optional[datetime],
+    post_type: str,
+    log_hook: Optional[LogHook] = None,
+) -> PostData:
+    likes: Optional[int] = None
+    comments: Optional[int] = None
+    shares = 0
+
+    wait_for_metric_elements(page)
+    extracted_likes, extracted_comments, extracted_shares, payload = extract_post_metrics(page)
+    if payload is not None and post_type == "Photo/Video":
+        post_type = infer_post_type(url, payload)
+
+    likes = extracted_likes
+    comments = extracted_comments
+    shares = extracted_shares if extracted_shares is not None else 0
+
+    emit_log(
+        log_hook,
+        "INFO",
+        "Metrics extracted",
+        f"{url} -> likes={likes}, comments={comments}, shares={shares}, date={raw_date or 'N/A'}",
+    )
+
+    return PostData(
+        url=url,
+        post_type=post_type,
+        post_date_raw=raw_date,
+        post_date_obj=date_obj,
+        likes=likes,
+        comments=comments,
+        shares=shares,
+    )
+
+
 def collect_post_links(
     page,
     max_posts: Optional[int] = None,
@@ -1538,27 +1599,12 @@ def extract_post_data(page, url: str, log_hook: Optional[LogHook] = None) -> Pos
     for attempt in range(1, POST_LOAD_RETRIES + 1):
         attempt_started = time.perf_counter()
         try:
-            # Navigate to the post URL
-            page.goto(url, wait_until="domcontentloaded", timeout=POST_GOTO_TIMEOUT)
-            
-            # Wait for post page structure to load
-            wait_for_post_ready(page, url)
-            
-            # Explicitly wait for metric elements to appear
-            wait_for_metric_elements(page)
-
-            post_type = infer_post_type_from_dom(page, url)
-            
-            # Extract all data after full page load
-            raw_date, date_obj = extract_date(page)
-            extracted_likes, extracted_comments, extracted_shares, payload = extract_post_metrics(page)
-            if payload is not None and post_type == "Photo/Video":
-                post_type = infer_post_type(url, payload)
-            
-            # Use extracted values; default shares to 0 if not found
-            likes = extracted_likes
-            comments = extracted_comments
-            shares = extracted_shares if extracted_shares is not None else 0
+            raw_date, date_obj, post_type = open_post_for_extraction(page, url)
+            post_data = extract_metrics_from_loaded_post(page, url, raw_date, date_obj, post_type, log_hook=log_hook)
+            likes = post_data.likes
+            comments = post_data.comments
+            shares = post_data.shares
+            post_type = post_data.post_type
 
             elapsed = time.perf_counter() - attempt_started
             
