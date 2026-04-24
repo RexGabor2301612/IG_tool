@@ -2809,3 +2809,37 @@ body {
         grid-template-columns: 1fr;
     }
 }
+
+/* UI stability fixes: avoid clipped text, crowded center column, and unclear disabled states */
+@media (min-width: 1181px) {
+    .workspace {
+        grid-template-columns: minmax(320px, 0.95fr) minmax(380px, 1.1fr) minmax(430px, 1.2fr);
+    }
+}
+
+.center-stack,
+.status-mini-grid,
+.mini-card,
+.mini-card h4 {
+    min-width: 0;
+}
+
+.mini-card h4 {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.control-btn:disabled,
+.review-btn:disabled,
+.tiny-btn:disabled,
+.icon-only-btn:disabled,
+.download-btn:disabled,
+.cancel-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    filter: grayscale(0.2);
+    transform: none;
+}
