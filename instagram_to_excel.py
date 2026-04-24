@@ -232,44 +232,159 @@ def get_minimum_rounds_before_stop(scroll_rounds: int, stagnant_limit: int) -> i
     return min(scroll_rounds, max(8, min(15, stagnant_limit)))
 
 
-def get_profile_scroll_state(page) -> dict[str, int | bool]:
+def get_profile_scroll_state(page) -> dict[str, int | bool | str]:
     return page.evaluate(
         """() => {
+            const anchors = Array.from(document.querySelectorAll("a[href*='/p/'], a[href*='/reel/']"));
+            const fallback = document.scrollingElement || document.documentElement || document.body;
+            const describe = (el) => {
+                if (!el) return 'window';
+                const id = el.id ? `#${el.id}` : '';
+                const className = typeof el.className === 'string' && el.className.trim()
+                    ? `.${el.className.trim().split(/\\s+/).slice(0, 2).join('.')}`
+                    : '';
+                return `${(el.tagName || 'window').toLowerCase()}${id}${className}`;
+            };
+            const seen = new Set();
+            const candidates = [];
+            const pushCandidate = (el, source) => {
+                if (!el || seen.has(el)) return;
+                seen.add(el);
+
+                const scrollHeight = Number(el.scrollHeight || 0);
+                const clientHeight = Number(el.clientHeight || 0);
+                if (scrollHeight <= clientHeight + 48) return;
+
+                const rect = typeof el.getBoundingClientRect === 'function'
+                    ? el.getBoundingClientRect()
+                    : { height: clientHeight };
+
+                let score = scrollHeight - clientHeight;
+                const lastAnchor = anchors.length ? anchors[anchors.length - 1] : null;
+                const firstAnchor = anchors.length ? anchors[0] : null;
+                if (lastAnchor && typeof el.contains === 'function' && el.contains(lastAnchor)) score += 200000;
+                if (firstAnchor && typeof el.contains === 'function' && el.contains(firstAnchor)) score += 50000;
+                if (clientHeight >= Math.max((window.innerHeight || clientHeight || 0) * 0.55, 360)) score += 10000;
+                if (rect.height >= Math.max((window.innerHeight || rect.height || 0) * 0.45, 280)) score += 5000;
+                if (el === fallback || el === document.body || el === document.documentElement) score += 1000;
+
+                candidates.push({ el, score, source });
+            };
+
+            pushCandidate(fallback, 'window');
+            if (document.body) pushCandidate(document.body, 'body');
+            if (document.documentElement) pushCandidate(document.documentElement, 'document');
+
+            const sampleAnchors = anchors.length
+                ? [
+                    anchors[0],
+                    anchors[Math.floor(anchors.length / 2)],
+                    anchors[anchors.length - 1],
+                ].filter(Boolean)
+                : [];
+
+            for (const anchor of sampleAnchors) {
+                let node = anchor;
+                while (node && node !== document.body) {
+                    pushCandidate(node, 'ancestor');
+                    node = node.parentElement;
+                }
+            }
+
+            candidates.sort((a, b) => b.score - a.score);
+            const chosen = candidates[0] || { el: fallback, source: 'window' };
+            const root = chosen.el || fallback;
             const doc = document.scrollingElement || document.documentElement;
             const unique = new Set(
-                Array.from(document.querySelectorAll("a[href*='/p/'], a[href*='/reel/']"))
-                    .map(anchor => (anchor.href || "").split("?")[0])
-                    .filter(Boolean)
+                anchors.map(anchor => (anchor.href || "").split("?")[0]).filter(Boolean)
             );
-            const scrollTop = Number(doc.scrollTop || window.pageYOffset || 0);
-            const scrollHeight = Number(Math.max(
+            const bodyHeight = Number(Math.max(
                 doc.scrollHeight || 0,
-                document.body ? document.body.scrollHeight : 0
+                document.body ? document.body.scrollHeight : 0,
+                document.documentElement ? document.documentElement.scrollHeight : 0
             ));
-            const viewportHeight = Number(window.innerHeight || doc.clientHeight || 0);
+            const rootIsWindow = root === fallback || root === document.body || root === document.documentElement;
+            const scrollTop = rootIsWindow ? Number(doc.scrollTop || window.pageYOffset || 0) : Number(root.scrollTop || 0);
+            const rootHeight = rootIsWindow ? bodyHeight : Number(root.scrollHeight || 0);
+            const viewportHeight = rootIsWindow ? Number(window.innerHeight || doc.clientHeight || 0) : Number(root.clientHeight || window.innerHeight || 0);
             return {
                 linkCount: unique.size,
                 scrollTop,
-                scrollHeight,
+                scrollHeight: rootHeight,
+                rootHeight,
                 viewportHeight,
-                atBottom: scrollTop + viewportHeight >= scrollHeight - 16,
+                rootClientHeight: viewportHeight,
+                bodyHeight,
+                bodyScrollTop: Number(doc.scrollTop || window.pageYOffset || 0),
+                scrollRoot: rootIsWindow ? "window" : describe(root),
+                scrollRootSource: chosen.source || "window",
+                atBottom: scrollTop + viewportHeight >= rootHeight - 24,
             };
         }"""
     )
 
 
-def advance_profile_grid(page, strategy: str = "anchor-step") -> dict[str, int | bool]:
+def advance_profile_grid(page, strategy: str = "anchor-step") -> dict[str, int | bool | str]:
     return page.evaluate(
         """(strategy) => {
-            const doc = document.scrollingElement || document.documentElement;
             const anchors = Array.from(document.querySelectorAll("a[href*='/p/'], a[href*='/reel/']"));
-            const beforeTop = Number(doc.scrollTop || window.pageYOffset || 0);
-            const viewportHeight = Number(window.innerHeight || doc.clientHeight || 0);
+            const fallback = document.scrollingElement || document.documentElement || document.body;
+            const seen = new Set();
+            const candidates = [];
+            const pushCandidate = (el, source) => {
+                if (!el || seen.has(el)) return;
+                seen.add(el);
+                const scrollHeight = Number(el.scrollHeight || 0);
+                const clientHeight = Number(el.clientHeight || 0);
+                if (scrollHeight <= clientHeight + 48) return;
+
+                let score = scrollHeight - clientHeight;
+                const lastAnchor = anchors.length ? anchors[anchors.length - 1] : null;
+                if (lastAnchor && typeof el.contains === 'function' && el.contains(lastAnchor)) score += 200000;
+                if (clientHeight >= Math.max((window.innerHeight || clientHeight || 0) * 0.55, 360)) score += 10000;
+                if (el === fallback || el === document.body || el === document.documentElement) score += 1000;
+                candidates.push({ el, score, source });
+            };
+
+            pushCandidate(fallback, 'window');
+            if (document.body) pushCandidate(document.body, 'body');
+            if (document.documentElement) pushCandidate(document.documentElement, 'document');
+
+            const sampleAnchors = anchors.length
+                ? [
+                    anchors[0],
+                    anchors[Math.floor(anchors.length / 2)],
+                    anchors[anchors.length - 1],
+                ].filter(Boolean)
+                : [];
+            for (const anchor of sampleAnchors) {
+                let node = anchor;
+                while (node && node !== document.body) {
+                    pushCandidate(node, 'ancestor');
+                    node = node.parentElement;
+                }
+            }
+
+            candidates.sort((a, b) => b.score - a.score);
+            const chosen = candidates[0] || { el: fallback, source: 'window' };
+            const root = chosen.el || fallback;
+            const doc = document.scrollingElement || document.documentElement;
+            const rootIsWindow = root === fallback || root === document.body || root === document.documentElement;
+            const beforeTop = rootIsWindow ? Number(doc.scrollTop || window.pageYOffset || 0) : Number(root.scrollTop || 0);
+            const viewportHeight = rootIsWindow ? Number(window.innerHeight || doc.clientHeight || 0) : Number(root.clientHeight || window.innerHeight || 0);
+            const beforeRootHeight = rootIsWindow
+                ? Number(Math.max(doc.scrollHeight || 0, document.body ? document.body.scrollHeight : 0, document.documentElement ? document.documentElement.scrollHeight : 0))
+                : Number(root.scrollHeight || 0);
+            const beforeBodyHeight = Number(Math.max(
+                doc.scrollHeight || 0,
+                document.body ? document.body.scrollHeight : 0,
+                document.documentElement ? document.documentElement.scrollHeight : 0
+            ));
 
             if (anchors.length) {
                 const targetAnchor =
                     strategy === 'anchor-step' ? anchors[anchors.length - 1]
-                    : strategy === 'viewport-step' ? anchors[Math.max(0, anchors.length - 3)]
+                    : strategy === 'viewport-step' ? anchors[Math.max(0, anchors.length - 4)]
                     : anchors[anchors.length - 1];
                 targetAnchor.scrollIntoView({ block: 'end', inline: 'nearest' });
             }
@@ -277,29 +392,66 @@ def advance_profile_grid(page, strategy: str = "anchor-step") -> dict[str, int |
             let step = Math.max(Math.floor((viewportHeight || 900) * 0.9), 900);
             if (strategy === 'viewport-step') {
                 step = Math.max(Math.floor((viewportHeight || 900) * 1.4), 1200);
-                window.scrollBy(0, step);
+                if (rootIsWindow) {
+                    window.scrollBy(0, step);
+                } else {
+                    root.scrollTop = Number(root.scrollTop || 0) + step;
+                    root.dispatchEvent(new Event('scroll', { bubbles: true }));
+                }
             } else if (strategy === 'bottom-jump') {
                 const target = Math.max(
-                    Number(doc.scrollHeight || 0),
-                    document.body ? Number(document.body.scrollHeight || 0) : 0
+                    rootIsWindow ? Number(doc.scrollHeight || 0) : Number(root.scrollHeight || 0),
+                    document.body ? Number(document.body.scrollHeight || 0) : 0,
+                    document.documentElement ? Number(document.documentElement.scrollHeight || 0) : 0
                 );
-                window.scrollTo(0, target);
+                if (rootIsWindow) {
+                    window.scrollTo(0, target);
+                } else {
+                    root.scrollTop = target;
+                    root.dispatchEvent(new Event('scroll', { bubbles: true }));
+                }
             } else {
-                window.scrollBy(0, step);
+                if (rootIsWindow) {
+                    window.scrollBy(0, step);
+                } else {
+                    root.scrollTop = Number(root.scrollTop || 0) + step;
+                    root.dispatchEvent(new Event('scroll', { bubbles: true }));
+                }
             }
 
-            const afterScrollTop = Number(doc.scrollTop || window.pageYOffset || 0);
+            const afterScrollTop = rootIsWindow ? Number(doc.scrollTop || window.pageYOffset || 0) : Number(root.scrollTop || 0);
             if (afterScrollTop <= beforeTop + 5) {
-                window.scrollTo(0, Math.max(doc.scrollHeight || 0, document.body ? document.body.scrollHeight : 0));
+                const fallbackTarget = Math.max(
+                    Number(doc.scrollHeight || 0),
+                    document.body ? Number(document.body.scrollHeight || 0) : 0,
+                    document.documentElement ? Number(document.documentElement.scrollHeight || 0) : 0
+                );
+                if (rootIsWindow) {
+                    window.scrollTo(0, fallbackTarget);
+                } else {
+                    root.scrollTop = Math.max(Number(root.scrollHeight || 0), fallbackTarget);
+                    root.dispatchEvent(new Event('scroll', { bubbles: true }));
+                }
             }
 
+            window.dispatchEvent(new Event('scroll'));
+
+            const bodyHeight = Number(Math.max(
+                Number(doc.scrollHeight || 0),
+                document.body ? Number(document.body.scrollHeight || 0) : 0,
+                document.documentElement ? Number(document.documentElement.scrollHeight || 0) : 0
+            ));
+            const rootHeight = rootIsWindow ? bodyHeight : Number(root.scrollHeight || 0);
             return {
-                scrollTop: Number(doc.scrollTop || window.pageYOffset || 0),
-                scrollHeight: Number(Math.max(
-                    doc.scrollHeight || 0,
-                    document.body ? document.body.scrollHeight : 0
-                )),
-                moved: afterScrollTop > beforeTop + 24,
+                scrollTop: rootIsWindow ? Number(doc.scrollTop || window.pageYOffset || 0) : Number(root.scrollTop || 0),
+                scrollHeight: rootHeight,
+                rootHeight,
+                bodyHeight,
+                scrollRoot: rootIsWindow ? "window" : (root.tagName || 'div').toLowerCase(),
+                scrollRootSource: chosen.source || "window",
+                moved: (rootIsWindow ? Number(doc.scrollTop || window.pageYOffset || 0) : Number(root.scrollTop || 0)) > beforeTop + 24,
+                rootHeightGrew: rootHeight > beforeRootHeight + 24,
+                bodyHeightGrew: bodyHeight > beforeBodyHeight + 24,
             };
         }""",
         arg=strategy,
@@ -308,27 +460,59 @@ def advance_profile_grid(page, strategy: str = "anchor-step") -> dict[str, int |
 
 def wait_for_profile_dom_growth(
     page,
-    previous_state: dict[str, int | bool],
+    previous_state: dict[str, int | bool | str],
     timeout_ms: int = SCROLL_WAIT_TIMEOUT,
-) -> dict[str, int | bool]:
+) -> dict[str, int | bool | str]:
     try:
         page.wait_for_function(
             """(prev) => {
+                const anchors = Array.from(document.querySelectorAll("a[href*='/p/'], a[href*='/reel/']"));
+                const fallback = document.scrollingElement || document.documentElement || document.body;
+                const seen = new Set();
+                const candidates = [];
+                const pushCandidate = (el, source) => {
+                    if (!el || seen.has(el)) return;
+                    seen.add(el);
+                    const scrollHeight = Number(el.scrollHeight || 0);
+                    const clientHeight = Number(el.clientHeight || 0);
+                    if (scrollHeight <= clientHeight + 48) return;
+                    let score = scrollHeight - clientHeight;
+                    const lastAnchor = anchors.length ? anchors[anchors.length - 1] : null;
+                    if (lastAnchor && typeof el.contains === 'function' && el.contains(lastAnchor)) score += 200000;
+                    if (clientHeight >= Math.max((window.innerHeight || clientHeight || 0) * 0.55, 360)) score += 10000;
+                    if (el === fallback || el === document.body || el === document.documentElement) score += 1000;
+                    candidates.push({ el, score, source });
+                };
+                pushCandidate(fallback, 'window');
+                if (document.body) pushCandidate(document.body, 'body');
+                if (document.documentElement) pushCandidate(document.documentElement, 'document');
+                const sampleAnchors = anchors.length
+                    ? [anchors[0], anchors[Math.floor(anchors.length / 2)], anchors[anchors.length - 1]].filter(Boolean)
+                    : [];
+                for (const anchor of sampleAnchors) {
+                    let node = anchor;
+                    while (node && node !== document.body) {
+                        pushCandidate(node, 'ancestor');
+                        node = node.parentElement;
+                    }
+                }
+                candidates.sort((a, b) => b.score - a.score);
+                const root = (candidates[0] || { el: fallback }).el || fallback;
                 const doc = document.scrollingElement || document.documentElement;
-                const unique = new Set(
-                    Array.from(document.querySelectorAll("a[href*='/p/'], a[href*='/reel/']"))
-                        .map(anchor => (anchor.href || "").split("?")[0])
-                        .filter(Boolean)
-                );
-                const scrollTop = Number(doc.scrollTop || window.pageYOffset || 0);
-                const scrollHeight = Number(Math.max(
+                const rootIsWindow = root === fallback || root === document.body || root === document.documentElement;
+                const unique = new Set(anchors.map(anchor => (anchor.href || "").split("?")[0]).filter(Boolean));
+                const scrollTop = rootIsWindow ? Number(doc.scrollTop || window.pageYOffset || 0) : Number(root.scrollTop || 0);
+                const bodyHeight = Number(Math.max(
                     doc.scrollHeight || 0,
-                    document.body ? document.body.scrollHeight : 0
+                    document.body ? document.body.scrollHeight : 0,
+                    document.documentElement ? document.documentElement.scrollHeight : 0
                 ));
-
+                const scrollHeight = rootIsWindow ? bodyHeight : Number(root.scrollHeight || 0);
                 return (
                     unique.size > prev.linkCount ||
                     scrollHeight > prev.scrollHeight + 24 ||
+                    scrollHeight > prev.bodyHeight + 24 ||
+                    bodyHeight > prev.bodyHeight + 24 ||
                     scrollTop > prev.scrollTop + 24
                 );
             }""",
@@ -343,26 +527,61 @@ def wait_for_profile_dom_growth(
 
 def confirm_profile_exhausted(
     page,
-    reference_state: dict[str, int | bool],
+    reference_state: dict[str, int | bool | str],
     timeout_ms: int = SCROLL_EXHAUSTION_CONFIRM_TIMEOUT,
-) -> tuple[bool, dict[str, int | bool]]:
+) -> tuple[bool, dict[str, int | bool | str]]:
     try:
         page.wait_for_function(
             """(prev) => {
+                const anchors = Array.from(document.querySelectorAll("a[href*='/p/'], a[href*='/reel/']"));
+                const fallback = document.scrollingElement || document.documentElement || document.body;
+                const seen = new Set();
+                const candidates = [];
+                const pushCandidate = (el) => {
+                    if (!el || seen.has(el)) return;
+                    seen.add(el);
+                    const scrollHeight = Number(el.scrollHeight || 0);
+                    const clientHeight = Number(el.clientHeight || 0);
+                    if (scrollHeight <= clientHeight + 48) return;
+                    let score = scrollHeight - clientHeight;
+                    const lastAnchor = anchors.length ? anchors[anchors.length - 1] : null;
+                    if (lastAnchor && typeof el.contains === 'function' && el.contains(lastAnchor)) score += 200000;
+                    if (clientHeight >= Math.max((window.innerHeight || clientHeight || 0) * 0.55, 360)) score += 10000;
+                    if (el === fallback || el === document.body || el === document.documentElement) score += 1000;
+                    candidates.push({ el, score });
+                };
+                pushCandidate(fallback);
+                if (document.body) pushCandidate(document.body);
+                if (document.documentElement) pushCandidate(document.documentElement);
+                const sampleAnchors = anchors.length
+                    ? [anchors[0], anchors[Math.floor(anchors.length / 2)], anchors[anchors.length - 1]].filter(Boolean)
+                    : [];
+                for (const anchor of sampleAnchors) {
+                    let node = anchor;
+                    while (node && node !== document.body) {
+                        pushCandidate(node);
+                        node = node.parentElement;
+                    }
+                }
+                candidates.sort((a, b) => b.score - a.score);
+                const root = (candidates[0] || { el: fallback }).el || fallback;
                 const doc = document.scrollingElement || document.documentElement;
+                const rootIsWindow = root === fallback || root === document.body || root === document.documentElement;
                 const unique = new Set(
-                    Array.from(document.querySelectorAll("a[href*='/p/'], a[href*='/reel/']"))
-                        .map(anchor => (anchor.href || "").split("?")[0])
-                        .filter(Boolean)
+                    anchors.map(anchor => (anchor.href || "").split("?")[0]).filter(Boolean)
                 );
-                const scrollTop = Number(doc.scrollTop || window.pageYOffset || 0);
-                const scrollHeight = Number(Math.max(
+                const scrollTop = rootIsWindow ? Number(doc.scrollTop || window.pageYOffset || 0) : Number(root.scrollTop || 0);
+                const bodyHeight = Number(Math.max(
                     doc.scrollHeight || 0,
-                    document.body ? document.body.scrollHeight : 0
+                    document.body ? document.body.scrollHeight : 0,
+                    document.documentElement ? document.documentElement.scrollHeight : 0
                 ));
+                const scrollHeight = rootIsWindow ? bodyHeight : Number(root.scrollHeight || 0);
                 return (
                     unique.size > prev.linkCount ||
                     scrollHeight > prev.scrollHeight + 24 ||
+                    scrollHeight > prev.bodyHeight + 24 ||
+                    bodyHeight > prev.bodyHeight + 24 ||
                     scrollTop > prev.scrollTop + 24
                 );
             }""",
@@ -376,9 +595,15 @@ def confirm_profile_exhausted(
             final_state["atBottom"]
             and final_state["linkCount"] <= reference_state["linkCount"]
             and final_state["scrollHeight"] <= reference_state["scrollHeight"] + 24
+            and final_state["bodyHeight"] <= reference_state["bodyHeight"] + 24
             and final_state["scrollTop"] <= reference_state["scrollTop"] + 24
         )
         return exhausted, final_state
+
+
+def auto_login_if_needed(page, context, profile_url: str, log_hook: Optional[LogHook] = None) -> bool:
+    """Backend-only automatic Instagram login using env vars or isolated test credentials."""
+    return login_to_instagram_if_needed(page, context, profile_url, log_hook=log_hook)
 
 
 def click_button_if_visible(page, pattern: str, timeout_ms: int = 1200) -> bool:
@@ -462,7 +687,7 @@ def prepare_profile_page(
         emit_log(log_hook, "INFO", "Profile ready", f"Grid detected in {elapsed:.2f}s.")
         return
 
-    attempted_login = login_to_instagram_if_needed(page, context, profile_url, log_hook=log_hook)
+    attempted_login = auto_login_if_needed(page, context, profile_url, log_hook=log_hook)
     if attempted_login:
         elapsed = time.perf_counter() - start_time
         emit_log(log_hook, "INFO", "Profile ready", f"Login-backed session restored in {elapsed:.2f}s.")
@@ -1084,7 +1309,7 @@ VISIBLE_ACTION_METRICS_SCRIPT = r"""
             const rect = rectInfo(el);
             if (rect.width > 140 || rect.height > 60) continue;
 
-            counts.push({ text: text.replace(/\s+/g, ""), rect });
+            counts.push({ text: text.replace(/\\s+/g, ""), rect });
         }
 
         return counts;
@@ -1346,12 +1571,26 @@ def extract_date(page) -> tuple[str, Optional[datetime]]:
         return "", None
 
 
-def open_post_for_extraction(page, url: str) -> tuple[str, Optional[datetime], str]:
-    page.goto(url, wait_until="domcontentloaded", timeout=POST_GOTO_TIMEOUT)
+def open_post_for_extraction(page, url: str, goto_timeout: int = POST_GOTO_TIMEOUT) -> tuple[str, Optional[datetime], str]:
+    page.goto(url, wait_until="domcontentloaded", timeout=goto_timeout)
     wait_for_post_ready(page, url)
     post_type = infer_post_type_from_dom(page, url)
     raw_date, date_obj = extract_date(page)
     return raw_date, date_obj, post_type
+
+
+def probe_post_date(
+    page,
+    url: str,
+    log_hook: Optional[LogHook] = None,
+    goto_timeout: int = 15000,
+) -> Optional[datetime]:
+    try:
+        _, date_obj, _ = open_post_for_extraction(page, url, goto_timeout=goto_timeout)
+        return date_obj
+    except Exception as exc:
+        emit_log(log_hook, "WARN", "Oldest date probe failed", f"{url} ({type(exc).__name__})")
+        return None
 
 
 def extract_metrics_from_loaded_post(
@@ -1398,6 +1637,7 @@ def collect_post_links(
     max_posts: Optional[int] = None,
     scroll_rounds: int = MAX_SCROLL_ROUNDS,
     target_start_date: Optional[datetime] = None,
+    probe_page=None,
     log_hook: Optional[LogHook] = None,
     progress_hook: Optional[ProgressHook] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
@@ -1406,17 +1646,19 @@ def collect_post_links(
     stagnant = 0
     no_more_posts_proof = 0
     stopped_early = False
+    coverage_reached = False
+    likely_exhausted_logged = False
     stagnant_limit = get_effective_stagnant_limit(scroll_rounds)
     min_rounds_before_stop = get_minimum_rounds_before_stop(scroll_rounds, stagnant_limit)
     proof_rounds_required = SCROLL_STOP_PROOF_ROUNDS
     coverage_mode = target_start_date is not None
+    oldest_visible_date_seen: Optional[datetime] = None
+    newest_visible_date_seen: Optional[datetime] = None
+    last_probed_oldest_link = ""
 
     if coverage_mode:
         stagnant_limit = max(stagnant_limit, 12)
-        min_rounds_before_stop = max(
-            min_rounds_before_stop,
-            min(scroll_rounds, max(12, int(scroll_rounds * 0.7))),
-        )
+        min_rounds_before_stop = scroll_rounds
         proof_rounds_required = max(proof_rounds_required, 3)
 
     wait_for_profile_ready(page)
@@ -1451,6 +1693,14 @@ def collect_post_links(
     if links:
         print(f"  Initial grid: +{len(links)} links (total={len(links)})")
         emit_log(log_hook, "INFO", "Initial grid", f"+{len(links)} new links (total={len(links)}).")
+        if probe_page is not None:
+            initial_oldest_link = next(reversed(links))
+            oldest_date = probe_post_date(probe_page, initial_oldest_link, log_hook=log_hook)
+            if oldest_date is not None:
+                oldest_visible_date_seen = oldest_date
+                newest_visible_date_seen = oldest_date
+                last_probed_oldest_link = initial_oldest_link
+                emit_log(log_hook, "INFO", "Oldest post so far", oldest_date.strftime(DATE_INPUT_FORMAT))
     emit_progress(progress_hook, 0, scroll_rounds, len(links))
 
     for scroll_round in range(1, scroll_rounds + 1):
@@ -1468,9 +1718,11 @@ def collect_post_links(
         at_bottom_with_no_growth = False
         exhaustion_confirmed = False
         strategy_used = "none"
+        attempts_used = 0
 
         for attempt_index in range(SCROLL_ATTEMPTS_PER_ROUND):
             strategy_used = SCROLL_STRATEGIES[min(attempt_index, len(SCROLL_STRATEGIES) - 1)]
+            attempts_used = attempt_index + 1
 
             try:
                 advance_profile_grid(page, strategy_used)
@@ -1512,6 +1764,12 @@ def collect_post_links(
             previous_state = current_state
 
         new_count = len(links) - before
+        scroll_details = (
+            f"strategy={strategy_used}, attempts={attempts_used}, root={current_state['scrollRoot']}({current_state['scrollRootSource']}), "
+            f"root_height={previous_state['scrollHeight']}->{current_state['scrollHeight']}, "
+            f"body_height={previous_state['bodyHeight']}->{current_state['bodyHeight']}, "
+            f"top={previous_state['scrollTop']}->{current_state['scrollTop']}"
+        )
 
         if new_count > 0:
             stagnant = 0
@@ -1521,8 +1779,28 @@ def collect_post_links(
                 log_hook,
                 "INFO",
                 f"Scroll {scroll_round}",
-                f"+{new_count} new links (total={len(links)}, strategy={strategy_used}, height={current_state['scrollHeight']}, top={current_state['scrollTop']}).",
+                f"+{new_count} new links (total={len(links)}, {scroll_details}).",
             )
+            if probe_page is not None:
+                oldest_link = next(reversed(links))
+                if oldest_link != last_probed_oldest_link:
+                    oldest_date = probe_post_date(probe_page, oldest_link, log_hook=log_hook)
+                    if oldest_date is not None:
+                        last_probed_oldest_link = oldest_link
+                        oldest_visible_date_seen = oldest_date
+                        newest_visible_date_seen = newest_visible_date_seen or oldest_date
+                        emit_log(log_hook, "INFO", "Oldest post so far", oldest_date.strftime(DATE_INPUT_FORMAT))
+                        if target_start_date is not None and oldest_date.date() < target_start_date.date():
+                            coverage_reached = True
+                            emit_log(
+                                log_hook,
+                                "SUCCESS",
+                                "Stopped because older than start date reached",
+                                (
+                                    f"Oldest visible post {oldest_date.strftime(DATE_INPUT_FORMAT)} is older than "
+                                    f"start date {target_start_date.strftime(DATE_INPUT_FORMAT)}."
+                                ),
+                            )
         else:
             if dom_changed:
                 stagnant = 0
@@ -1532,7 +1810,7 @@ def collect_post_links(
                     log_hook,
                     "INFO",
                     f"Scroll {scroll_round}",
-                    f"+0 new links; content moved after {strategy_used} (height={current_state['scrollHeight']}, top={current_state['scrollTop']}, moved={scrolled}, height_grew={height_grew}).",
+                    f"+0 new links; content moved ({scroll_details}, moved={scrolled}, height_grew={height_grew or current_state.get('rootHeightGrew')}, body_height_grew={current_state.get('bodyHeightGrew')}).",
                 )
             else:
                 stagnant += 1
@@ -1555,14 +1833,14 @@ def collect_post_links(
                     no_more_posts_proof = 0
                     reason = (
                         f"+0 new links; scroll did not move after {strategy_used} "
-                        f"(lazy loading may have stalled, stagnant {stagnant}/{stagnant_limit}, total={len(links)})."
+                        f"({scroll_details}, lazy loading may have stalled, stagnant {stagnant}/{stagnant_limit}, total={len(links)})."
                     )
                     print(f"  Scroll {scroll_round}: {reason}")
                 else:
                     no_more_posts_proof = 0
                     reason = (
                         f"+0 new links after {strategy_used} "
-                        f"(stagnant {stagnant}/{stagnant_limit}, total={len(links)})."
+                        f"({scroll_details}, stagnant {stagnant}/{stagnant_limit}, total={len(links)})."
                     )
                     print(f"  Scroll {scroll_round}: {reason}")
 
@@ -1575,13 +1853,35 @@ def collect_post_links(
 
         emit_progress(progress_hook, scroll_round, scroll_rounds, len(links))
 
+        if coverage_reached:
+            stopped_early = True
+            break
+
         if max_posts is not None and len(links) >= max_posts:
             print(f"Reached max_posts limit: {max_posts}")
             emit_log(log_hook, "INFO", "Link collection stopped", f"Reached max_posts limit: {max_posts}.")
             stopped_early = True
             break
 
-        if (
+        if coverage_mode:
+            if (
+                scroll_round >= max(3, scroll_rounds // 2)
+                and stagnant >= stagnant_limit
+                and no_more_posts_proof >= proof_rounds_required
+                and not likely_exhausted_logged
+            ):
+                emit_log(
+                    log_hook,
+                    "WARN",
+                    "Likely exhausted before target date",
+                    (
+                        f"Scroll stalled with strong exhaustion proof, but the collector will continue until "
+                        f"max rounds ({scroll_rounds}) because target date "
+                        f"{target_start_date.strftime(DATE_INPUT_FORMAT) if target_start_date else 'n/a'} has not been confirmed yet."
+                    ),
+                )
+                likely_exhausted_logged = True
+        elif (
             scroll_round >= min_rounds_before_stop
             and stagnant >= stagnant_limit
             and no_more_posts_proof >= proof_rounds_required
