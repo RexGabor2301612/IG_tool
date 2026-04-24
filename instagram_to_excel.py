@@ -227,6 +227,8 @@ def detect_login_gate(page) -> tuple[bool, str]:
         ("text='Continue watching'", "Instagram continue-watching gate text detected."),
         ("text='Log in to continue'", "Instagram login wall detected."),
         ("text='See photos and videos'", "Instagram sign-in wall detected."),
+        ("text='See more from'", "Instagram login wall teaser detected."),
+        ("text='See more photos and videos'", "Instagram sign-in teaser detected."),
     ]
     for selector, reason in gate_selectors:
         try:
@@ -246,6 +248,10 @@ def detect_login_gate(page) -> tuple[bool, str]:
         return True, "Instagram login wall detected."
     if "sign up to see photos and videos" in body_text:
         return True, "Instagram sign-up wall detected."
+    if "see more from" in body_text:
+        return True, "Instagram login wall teaser detected."
+    if "see more photos and videos" in body_text:
+        return True, "Instagram sign-in teaser detected."
 
     return False, ""
 

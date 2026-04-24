@@ -191,6 +191,11 @@ class ScrapeJobState:
         self.logs: list[dict[str, str]] = []
         self.cancel_requested = False
         self.go_requested = False
+        self.browser_session_created = False
+        self.profile_ready = False
+        self.login_required = False
+        self.ready_to_scrape = False
+        self.browser_url = ""
         self.started_at: Optional[float] = None
         self.finished_at: Optional[float] = None
 
@@ -216,7 +221,7 @@ class ScrapeJobState:
 
     def request_cancel(self) -> bool:
         with self.lock:
-            if self.status not in {"running", "stopping"}:
+            if self.status not in {"preparing", "waiting_login", "ready", "running", "paused", "stopping"}:
                 return False
 
             self.cancel_requested = True
@@ -230,7 +235,13 @@ class ScrapeJobState:
 
     def request_go(self) -> bool:
         with self.lock:
-            if self.status != "waiting_go" or self.go_requested:
+            if (
+                self.status != "ready"
+                or self.go_requested
+                or not self.browser_session_created
+                or not self.profile_ready
+                or not self.ready_to_scrape
+            ):
                 return False
             self.go_requested = True
             return True
@@ -272,7 +283,18 @@ class ScrapeJobState:
                 "config": self.config_summary,
                 "cancelRequested": self.cancel_requested,
                 "goRequested": self.go_requested,
-                "canGo": self.status == "waiting_go" and not self.go_requested,
+                "browserSessionCreated": self.browser_session_created,
+                "profileReady": self.profile_ready,
+                "loginRequired": self.login_required,
+                "readyToScrape": self.ready_to_scrape,
+                "browserUrl": self.browser_url,
+                "canGo": (
+                    self.status == "ready"
+                    and self.browser_session_created
+                    and self.profile_ready
+                    and self.ready_to_scrape
+                    and not self.go_requested
+                ),
                 "canDownload": self.status == "completed" and bool(self.output_file) and Path(self.output_file).exists(),
             }
             if include_logs:
@@ -318,6 +340,38 @@ def login_wait_message() -> str:
         "Instagram login is required, but this environment cannot open a local interactive browser window. "
         "Run the app locally with PLAYWRIGHT_INTERACTIVE_BROWSER=true, or provide storage state / backend-only credentials."
     )
+
+
+def current_page_url(page, fallback: str = "") -> str:
+    try:
+        return page.url or fallback
+    except Exception:
+        return fallback
+
+
+def sync_browser_url(page, fallback: str = "") -> None:
+    JOB.update(browser_url=current_page_url(page, fallback))
+
+
+def mark_browser_ready(page, profile_url: str, *, waiting_for_go: bool) -> None:
+    browser_url = current_page_url(page, profile_url)
+    JOB.update(
+        status="ready" if waiting_for_go else "running",
+        active_task="Ready for extraction" if waiting_for_go else "Profile ready",
+        browser_session_created=True,
+        profile_ready=True,
+        login_required=False,
+        ready_to_scrape=waiting_for_go,
+        browser_url=browser_url,
+        current_post=browser_url,
+    )
+
+
+def open_login_form_in_same_tab(page) -> None:
+    login_url = "https://www.instagram.com/accounts/login/"
+    if "accounts/login" in current_page_url(page):
+        return
+    page.goto(login_url, wait_until="domcontentloaded", timeout=scraper.POST_GOTO_TIMEOUT)
 
 
 def broadcast_dashboard_event(event_type: str, data: dict[str, Any]) -> None:
@@ -588,50 +642,103 @@ def pump_live_runtime(page, active_task: str, note: str, force_preview: bool = F
     emit_preview_frame(page, note, force=force_preview)
 
 
-def wait_for_user_login(page, context, profile_url: str) -> None:
+def wait_for_user_login(page, context, profile_url: str, *, waiting_for_go: bool) -> None:
     message = login_wait_message()
     if using_local_browser_window():
         try:
             page.bring_to_front()
         except Exception:
             pass
-    JOB.update(status="waiting_login", active_task="Waiting for user login")
-    JOB.add_log("WARN", "Login required", "Instagram login is required before scrolling can continue.")
-    JOB.add_log("WARN", "Waiting for user login", message)
-    broadcast_dashboard_event("login_required", {"message": message, "url": page.url or profile_url})
+    JOB.update(
+        status="waiting_login",
+        active_task="Waiting for Instagram login",
+        browser_session_created=True,
+        profile_ready=False,
+        login_required=True,
+        ready_to_scrape=False,
+        browser_url=current_page_url(page, profile_url),
+        current_post=current_page_url(page, profile_url),
+    )
+    JOB.add_log("WARN", "Login required", "Instagram login is required before scrolling or extraction can continue.")
+    JOB.add_log("INFO", "Reusing existing browser session", "Waiting in the same Playwright browser tab. No duplicate browser or page will be opened.")
+    JOB.add_log("WARN", "Waiting for manual login", message)
+    broadcast_dashboard_event("login_required", {"message": message, "url": current_page_url(page, profile_url)})
     emit_preview_frame(page, "Waiting for user login", force=True)
 
     if not using_local_browser_window():
         raise RuntimeError(message)
 
     deadline = time.monotonic() + (LOGIN_READY_TIMEOUT / 1000)
-    last_profile_refresh = 0.0
+    login_form_logged = False
+    login_page_opened = False
+    returned_to_profile_after_login = False
     while time.monotonic() < deadline:
         if JOB.should_cancel():
             raise ScrapeCancelled("Cancelled while waiting for user login.")
 
         wait_if_paused(page, "Waiting for user login")
         drain_control_commands(page)
+        sync_browser_url(page, profile_url)
         emit_preview_frame(page, "Waiting for user login")
 
         if scraper.profile_ready_for_collection(page):
             scraper.save_storage_state(context, JOB.add_log)
-            JOB.update(status="running", active_task="Profile ready")
-            JOB.add_log("SUCCESS", "Login completed", "Profile grid is visible; scraping will resume.")
+            mark_browser_ready(page, profile_url, waiting_for_go=waiting_for_go)
+            JOB.add_log(
+                "SUCCESS",
+                "Login completed",
+                "Profile grid is visible in the existing browser session."
+                if not waiting_for_go
+                else "Profile grid is visible. Login completed and the session is ready for GO.",
+            )
             JOB.add_log("SUCCESS", "Profile grid detected", "Profile grid is visible after login.")
-            broadcast_dashboard_event("login_completed", {"message": "Login completed. Profile grid detected.", "url": page.url or profile_url})
+            if waiting_for_go:
+                JOB.add_log("INFO", "Ready for extraction", "Login completed. Ready to start extraction once GO is pressed.")
+            broadcast_dashboard_event("login_completed", {"message": "Login completed. Profile grid detected.", "url": current_page_url(page, profile_url)})
             emit_preview_frame(page, "Login complete", force=True)
             return
 
-        if time.monotonic() - last_profile_refresh >= 4:
-            current_url = page.url or ""
-            if "instagram.com" in current_url and "accounts/login" not in current_url and "/challenge/" not in current_url:
+        login_required, login_reason = scraper.detect_login_gate(page)
+        login_form_visible = scraper.wait_for_selector(page, scraper.LOGIN_FORM_SELECTOR, 200)
+
+        if login_required:
+            JOB.update(login_required=True, profile_ready=False, ready_to_scrape=False, browser_url=current_page_url(page, profile_url))
+            returned_to_profile_after_login = False
+            if login_form_visible:
+                if not login_form_logged:
+                    JOB.add_log("INFO", "Login form detected", "Instagram login form is visible in the current browser tab.")
+                    login_form_logged = True
+                login_page_opened = True
+            elif not login_page_opened:
                 try:
-                    page.goto(profile_url, wait_until="domcontentloaded", timeout=scraper.POST_GOTO_TIMEOUT)
-                    emit_preview_frame(page, "Refreshing profile after login")
-                except Exception:
-                    pass
-            last_profile_refresh = time.monotonic()
+                    JOB.add_log("INFO", "Opening Instagram login form", "Navigating the current browser tab to Instagram's login page for manual sign-in.")
+                    open_login_form_in_same_tab(page)
+                    sync_browser_url(page, profile_url)
+                    login_page_opened = True
+                except Exception as exc:
+                    JOB.add_log("WARN", "Login form navigation failed", f"{type(exc).__name__}")
+            time.sleep(0.3)
+            continue
+
+        current_url = current_page_url(page, profile_url)
+        if (
+            not returned_to_profile_after_login
+            and "instagram.com" in current_url
+            and "accounts/login" not in current_url
+            and "/challenge/" not in current_url
+            and "two_factor" not in current_url
+            and "onetap" not in current_url
+            and current_url.rstrip("/") != profile_url.rstrip("/")
+        ):
+            try:
+                JOB.add_log("INFO", "Login session detected", "Login gate cleared. Returning to the target profile in the existing browser tab.")
+                page.goto(profile_url, wait_until="domcontentloaded", timeout=scraper.POST_GOTO_TIMEOUT)
+                sync_browser_url(page, profile_url)
+                returned_to_profile_after_login = True
+                login_form_logged = False
+                continue
+            except Exception as exc:
+                JOB.add_log("WARN", "Profile reload after login failed", f"{type(exc).__name__}")
 
         time.sleep(0.3)
 
@@ -639,7 +746,7 @@ def wait_for_user_login(page, context, profile_url: str) -> None:
 
 
 def wait_for_go_signal(page) -> None:
-    JOB.update(status="waiting_go", active_task="Waiting for GO signal")
+    mark_browser_ready(page, current_page_url(page), waiting_for_go=True)
     JOB.add_log(
         "INFO",
         "Waiting for GO signal",
@@ -651,9 +758,10 @@ def wait_for_go_signal(page) -> None:
             raise ScrapeCancelled("Cancelled while waiting for GO signal.")
 
         drain_control_commands(page)
+        sync_browser_url(page, current_page_url(page))
         time.sleep(0.2)
 
-    JOB.update(status="running", active_task="Starting scroll collection")
+    JOB.update(status="running", active_task="Starting scroll collection", ready_to_scrape=False, login_required=False)
     JOB.add_log("SUCCESS", "GO signal received", "Starting scroll collection and extraction.")
 
 
@@ -667,7 +775,7 @@ def ensure_login_ready(page, context, profile_url: str, active_task: str, delay_
     JOB.add_log("WARN", "Login required", reason or "Instagram login is required.")
     if delay_reason:
         JOB.add_log("WARN", "Link collection delayed because login is required", delay_reason)
-    wait_for_user_login(page, context, profile_url)
+    wait_for_user_login(page, context, profile_url, waiting_for_go=False)
     JOB.add_log("INFO", "Resuming scroll after login", "Profile grid detected. Resuming automated collection.")
     emit_preview_frame(page, "Resuming after login", force=True)
     return True
@@ -711,8 +819,10 @@ def collect_post_links_with_progress(page, config: WebScrapeConfig) -> list[str]
         pump_live_runtime(runtime_page, "Collecting post links", note, force_preview=phase != "scroll-round")
 
     diagnostics: dict[str, Any] = {}
-    probe_page = page.context.new_page()
-    probe_page.route("**/*", scraper.route_nonessential_resources)
+    probe_page = None
+    if not using_local_browser_window():
+        probe_page = page.context.new_page()
+        probe_page.route("**/*", scraper.route_nonessential_resources)
 
     try:
         links = scraper.collect_post_links(
@@ -753,10 +863,21 @@ def collect_post_links_with_progress(page, config: WebScrapeConfig) -> list[str]
             pass
 
 
-def wait_for_profile_after_login(page, context, profile_url: str) -> None:
-    """Wait until the profile grid is ready, supporting auto-login and user-assisted login via live preview."""
-    JOB.update(active_task="Opening Instagram profile")
+def wait_until_profile_ready_or_login_completed(page, context, profile_url: str) -> None:
+    """Block until the target profile is ready for extraction, without scraping before login completes."""
+    JOB.update(
+        status="preparing",
+        active_task="Opening Instagram profile",
+        browser_session_created=True,
+        profile_ready=False,
+        login_required=False,
+        ready_to_scrape=False,
+        browser_url=profile_url,
+        current_post=profile_url,
+    )
+    JOB.add_log("INFO", "Opened target profile", profile_url)
     page.goto(profile_url, wait_until="domcontentloaded", timeout=scraper.POST_GOTO_TIMEOUT)
+    sync_browser_url(page, profile_url)
     emit_preview_frame(page, "Profile opened", force=True)
     JOB.add_log("INFO", "Checking login state", "Checking whether Instagram requires login before scraping.")
 
@@ -768,34 +889,38 @@ def wait_for_profile_after_login(page, context, profile_url: str) -> None:
         JOB.add_log("WARN", "Login required", login_reason or "Instagram login is required.")
         JOB.add_log("WARN", "Link collection delayed because login is required", "Waiting for user login before scrolling.")
         if scraper.auto_login_if_needed(page, context, profile_url, log_hook=JOB.add_log):
+            mark_browser_ready(page, profile_url, waiting_for_go=True)
             JOB.add_log("SUCCESS", "Login completed", "Automatic login restored the session.")
             JOB.add_log("SUCCESS", "Profile grid detected", "Profile grid is visible after login.")
+            JOB.add_log("INFO", "Ready for extraction", "Login completed. Ready to start extraction once GO is pressed.")
             emit_preview_frame(page, "Auto-login complete", force=True)
             return
-        wait_for_user_login(page, context, profile_url)
-        JOB.add_log("SUCCESS", "Login detected", "Login successful. Profile grid detected and waiting for GO signal.")
+        wait_for_user_login(page, context, profile_url, waiting_for_go=True)
         return
 
     if scraper.profile_ready_for_collection(page):
+        mark_browser_ready(page, profile_url, waiting_for_go=True)
         JOB.add_log("SUCCESS", "Profile detected", "Post grid is visible; scraping can continue.")
         JOB.add_log("INFO", "Profile grid detected", "Profile grid is visible and ready for collection.")
+        JOB.add_log("INFO", "Ready for extraction", "Profile grid is visible. Click GO / START EXTRACTION to continue.")
         emit_preview_frame(page, "Profile grid detected", force=True)
         return
 
     if scraper.auto_login_if_needed(page, context, profile_url, log_hook=JOB.add_log):
+        mark_browser_ready(page, profile_url, waiting_for_go=True)
         JOB.add_log("SUCCESS", "Profile detected", "Auto-login restored the Instagram session.")
         JOB.add_log("SUCCESS", "Login completed", "Profile grid is visible after automatic login.")
+        JOB.add_log("INFO", "Ready for extraction", "Profile grid is visible. Click GO / START EXTRACTION to continue.")
         emit_preview_frame(page, "Auto-login complete", force=True)
         return
 
     if scraper.wait_for_selector(page, scraper.LOGIN_FORM_SELECTOR, 1200):
         JOB.add_log("WARN", "Login required", "Instagram login form is visible.")
         JOB.add_log("WARN", "Link collection delayed because login is required", "Waiting for user login before scrolling.")
-        wait_for_user_login(page, context, profile_url)
-        JOB.add_log("SUCCESS", "Login detected", "Login successful. Profile grid detected and waiting for GO signal.")
+        wait_for_user_login(page, context, profile_url, waiting_for_go=True)
         return
 
-    JOB.update(active_task="Waiting for Instagram profile")
+    JOB.update(active_task="Waiting for Instagram profile", status="preparing", browser_session_created=True, profile_ready=False, ready_to_scrape=False)
     JOB.add_log("INFO", "Waiting for profile", "Waiting for Instagram profile grid to load before scrolling begins.")
     deadline = time.monotonic() + (HEADLESS_PROFILE_READY_TIMEOUT / 1000)
     while time.monotonic() < deadline:
@@ -803,17 +928,19 @@ def wait_for_profile_after_login(page, context, profile_url: str) -> None:
             raise ScrapeCancelled("Cancelled while waiting for Instagram login/profile.")
 
         pump_live_runtime(page, "Waiting for Instagram profile", "Waiting for Instagram profile")
+        sync_browser_url(page, profile_url)
         if scraper.profile_ready_for_collection(page):
+            mark_browser_ready(page, profile_url, waiting_for_go=True)
             JOB.add_log("SUCCESS", "Profile detected", "Post grid is visible; scraping can continue.")
             JOB.add_log("INFO", "Profile grid detected", "Profile grid is visible and ready for collection.")
+            JOB.add_log("INFO", "Ready for extraction", "Profile grid is visible. Click GO / START EXTRACTION to continue.")
             emit_preview_frame(page, "Profile grid detected", force=True)
             return
         login_required, login_reason = scraper.detect_login_gate(page)
         if login_required:
             JOB.add_log("WARN", "Login required", login_reason or "Instagram login is required.")
             JOB.add_log("WARN", "Link collection delayed because login is required", "Waiting for user login before scrolling.")
-            wait_for_user_login(page, context, profile_url)
-            JOB.add_log("SUCCESS", "Login detected", "Login successful. Profile grid detected and waiting for GO signal.")
+            wait_for_user_login(page, context, profile_url, waiting_for_go=True)
             return
         time.sleep(0.25)
 
@@ -826,10 +953,16 @@ def wait_for_profile_after_login(page, context, profile_url: str) -> None:
 def run_scrape_job(config: WebScrapeConfig) -> None:
     CONTROL_BUS.reset()
     JOB.update(
-        status="running",
-        active_task="Opening browser",
+        status="preparing",
+        active_task="Creating browser session",
         output_file=config.output_file,
         config_summary=config_to_summary(config),
+        browser_session_created=False,
+        profile_ready=False,
+        login_required=False,
+        ready_to_scrape=False,
+        browser_url=config.profile_url,
+        current_post="",
         started_at=time.time(),
         finished_at=None,
     )
@@ -853,6 +986,8 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
             context.route("**/*", scraper.route_nonessential_resources)
 
             page = context.new_page()
+            JOB.update(browser_session_created=True, browser_url=current_page_url(page, config.profile_url))
+            JOB.add_log("INFO", "Browser session created", "Created one Playwright browser/context/page session for this job.")
             if using_local_browser_window():
                 try:
                     page.bring_to_front()
@@ -872,7 +1007,7 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
             emit_preview_frame(page, "Browser started", force=True)
             if scraper.PLAYWRIGHT_STORAGE_STATE:
                 JOB.add_log("INFO", "Storage state loaded", scraper.PLAYWRIGHT_STORAGE_STATE)
-            wait_for_profile_after_login(page, context, config.profile_url)
+            wait_until_profile_ready_or_login_completed(page, context, config.profile_url)
             wait_for_go_signal(page)
 
             link_collection_started = time.perf_counter()
@@ -1069,15 +1204,15 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
             JOB.add_log("SUCCESS", "Excel saved", config.output_file)
             broadcast_dashboard_event("job_completed", JOB.snapshot(include_logs=False))
             emit_preview_frame(page, "Excel saved", force=True)
-            JOB.update(status="completed", active_task="Completed", progress=100, finished_at=time.time())
+            JOB.update(status="completed", active_task="Completed", progress=100, finished_at=time.time(), ready_to_scrape=False, login_required=False)
     except ScrapeCancelled as exc:
-        JOB.update(status="stopped", active_task="Stopped", finished_at=time.time())
+        JOB.update(status="stopped", active_task="Stopped", finished_at=time.time(), ready_to_scrape=False, login_required=False)
         JOB.add_log("WARN", "Scrape cancelled", str(exc))
         if page is not None:
             emit_preview_frame(page, "Scrape cancelled", force=True)
     except Exception as exc:
         snapshot = JOB.snapshot()
-        JOB.update(status="failed", active_task="Failed", errors=snapshot["errors"] + 1, finished_at=time.time())
+        JOB.update(status="failed", active_task="Failed", errors=snapshot["errors"] + 1, finished_at=time.time(), ready_to_scrape=False)
         JOB.add_log("WARN", "Scrape failed", f"{type(exc).__name__}: {exc}")
         if page is not None:
             emit_preview_frame(page, "Scrape failed", force=True)
@@ -1092,6 +1227,7 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                 browser.close()
             except Exception:
                 pass
+        JOB.update(browser_session_created=False, profile_ready=False, login_required=False, ready_to_scrape=False, browser_url="")
         broadcast_job_snapshot(include_logs=False)
 
 
@@ -1176,6 +1312,7 @@ def start_scrape():
         return jsonify({"ok": False, "errors": errors, "overwriteRequired": overwrite_required}), 400
 
     if JOB_THREAD is not None and JOB_THREAD.is_alive():
+        JOB.add_log("WARN", "Prevented duplicate browser launch", "A job is already active, so a second browser session was not created.")
         return jsonify({"ok": False, "errors": ["A scraping job is already running."]}), 409
 
     JOB.reset()
@@ -1211,8 +1348,21 @@ def cancel_scrape():
 
 @app.post("/api/go")
 def go_signal():
+    snapshot = JOB.snapshot()
+    if not snapshot.get("browserSessionCreated"):
+        JOB.add_log("WARN", "Blocked GO", "GO was rejected because no browser session is active.")
+        return jsonify({"ok": False, "errors": ["No browser session is active. Click Run / Start first."], "status": snapshot}), 409
+    if snapshot.get("loginRequired") or not snapshot.get("profileReady"):
+        JOB.add_log("WARN", "Blocked GO", "GO was rejected because Instagram login/profile readiness is not complete yet.")
+        return jsonify({"ok": False, "errors": ["Please complete Instagram login first."], "status": snapshot}), 409
+    if snapshot.get("status") != "ready":
+        JOB.add_log("WARN", "Blocked GO", f"GO was rejected because the job state is {snapshot.get('status')}.")
+        return jsonify({"ok": False, "errors": ["The scraper is not ready for the GO signal yet."], "status": snapshot}), 409
     if not JOB.request_go():
+        JOB.add_log("WARN", "Blocked GO", "GO was rejected because the session was already continuing.")
         return jsonify({"ok": False, "errors": ["The scraper is not waiting for the GO signal."], "status": JOB.snapshot()}), 409
+
+    JOB.add_log("INFO", "Reusing existing browser session", "GO continues the existing Playwright page and browser session.")
 
     return jsonify({"ok": True, "status": JOB.snapshot()})
 
@@ -1220,7 +1370,7 @@ def go_signal():
 @app.post("/api/focus-browser")
 def focus_browser():
     snapshot = JOB.snapshot()
-    if snapshot["status"] not in {"running", "waiting_login", "waiting_go", "paused"}:
+    if snapshot["status"] not in {"preparing", "waiting_login", "ready", "running", "paused"}:
         return jsonify({"ok": False, "errors": ["No active browser session is available to focus."], "status": snapshot}), 409
     if not snapshot.get("localBrowserWindow"):
         return jsonify({"ok": False, "errors": ["This environment does not have a local browser window to focus."], "status": snapshot}), 409

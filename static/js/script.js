@@ -226,18 +226,20 @@ document.addEventListener("DOMContentLoaded", function () {
         const modeLabel = data.browserModeLabel || "Browser Session";
         const modeNote = data.browserModeNote || "Run / Start opens Chromium. Log in there, then click GO.";
         const activeTask = data.activeTask || "Waiting for input";
-        const currentUrl = data.currentPost || data.config?.instagramLink || "-";
+        const currentUrl = data.browserUrl || data.currentPost || data.config?.instagramLink || "-";
 
         browserModeText.textContent = modeLabel;
         browserModeDescription.textContent = modeNote;
         browserSessionUrlText.textContent = currentUrl || "-";
 
-        if (data.status === "waiting_login") {
+        if (data.status === "preparing") {
+            browserSessionStatusText.textContent = "Browser session created. Checking Instagram login state.";
+        } else if (data.status === "waiting_login") {
             browserSessionStatusText.textContent = data.localBrowserWindow
                 ? "Browser opened. Complete Instagram login in Chromium."
                 : "Login required, but this environment has no local browser window.";
-        } else if (data.status === "waiting_go") {
-            browserSessionStatusText.textContent = "Login detected. Waiting for your GO signal.";
+        } else if (data.status === "ready") {
+            browserSessionStatusText.textContent = "Login completed. Ready to start extraction.";
         } else if (data.status === "running") {
             browserSessionStatusText.textContent = activeTask;
         } else if (data.status === "completed") {
@@ -254,10 +256,12 @@ document.addEventListener("DOMContentLoaded", function () {
             goStatusText.textContent = "Ready. Click GO / Start Extraction.";
         } else if (data.goRequested) {
             goStatusText.textContent = "GO signal sent. Starting extraction...";
+        } else if (data.status === "preparing") {
+            goStatusText.textContent = "Preparing browser session.";
         } else if (data.status === "waiting_login") {
-            goStatusText.textContent = "Waiting for login.";
-        } else if (data.status === "waiting_go") {
-            goStatusText.textContent = "Waiting for GO signal.";
+            goStatusText.textContent = "Waiting for Instagram login.";
+        } else if (data.status === "ready") {
+            goStatusText.textContent = "Login completed. Waiting for GO signal.";
         } else if (data.status === "running") {
             goStatusText.textContent = "Extraction in progress.";
         } else if (data.status === "completed") {
@@ -269,7 +273,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
     function setButtonStates(data) {
         const status = data.status || "idle";
-        const activeStatuses = ["running", "stopping", "waiting_login", "waiting_go", "paused"].includes(status);
+        const activeStatuses = ["preparing", "running", "stopping", "waiting_login", "ready", "paused"].includes(status);
 
         confirmStartBtn.disabled = activeStatuses;
         runStartBtn.disabled = activeStatuses;
@@ -352,7 +356,7 @@ document.addEventListener("DOMContentLoaded", function () {
             return;
         }
         if (message.type === "login_completed" && message.data?.message) {
-            showMessage(message.data.message, "success");
+            showMessage("Login completed. Ready to start extraction.", "success");
             return;
         }
         if (message.type === "job_completed") {
@@ -470,7 +474,7 @@ document.addEventListener("DOMContentLoaded", function () {
             setModalVisible(confirmationModal, false);
             renderStatus(data.status);
             if (data.status?.localBrowserWindow) {
-                showMessage("Browser opened. Log in to Instagram there if needed. The scraper will wait for your GO signal before scrolling.", "success");
+                showMessage("Browser session created. Log in to Instagram in the opened Chromium window. GO will remain disabled until the profile is ready.", "success");
             } else {
                 showMessage("Scraping started. This environment has no local browser window, so login must come from stored session state or backend login support.", "warn");
             }
