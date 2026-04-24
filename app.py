@@ -250,6 +250,7 @@ def collect_post_links_with_progress(page, config: WebScrapeConfig) -> list[str]
             page,
             max_posts=None,
             scroll_rounds=config.scroll_rounds,
+            target_start_date=config.start_date,
             log_hook=JOB.add_log,
             progress_hook=progress_hook,
             cancel_check=JOB.should_cancel,
@@ -323,6 +324,9 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
 
             all_posts = []
             total_links = len(links)
+            oldest_post_seen: Optional[datetime] = None
+            newest_post_seen: Optional[datetime] = None
+            target_date_reached = False
             for index, link in enumerate(links, start=1):
                 if JOB.should_cancel():
                     raise ScrapeCancelled("Cancelled during post extraction.")
@@ -341,6 +345,21 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                     post = scraper.extract_post_data(page, link, log_hook=JOB.add_log)
                     post_elapsed = time.perf_counter() - post_started
                     all_posts.append(post)
+
+                    if post.post_date_obj is not None:
+                        if oldest_post_seen is None or post.post_date_obj < oldest_post_seen:
+                            oldest_post_seen = post.post_date_obj
+                            JOB.add_log("INFO", "Oldest post so far", scraper.format_post_date(post))
+                        if newest_post_seen is None or post.post_date_obj > newest_post_seen:
+                            newest_post_seen = post.post_date_obj
+                        if not target_date_reached and post.post_date_obj.date() <= config.start_date.date():
+                            target_date_reached = True
+                            JOB.add_log(
+                                "SUCCESS",
+                                "Reached target coverage",
+                                f"Collected a post dated {scraper.format_post_date(post)}, which is on/before the target start date.",
+                            )
+
                     success = post.likes is not None or post.comments is not None
                     if success:
                         snapshot = JOB.snapshot()
@@ -369,6 +388,21 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
 
             if JOB.should_cancel():
                 raise ScrapeCancelled("Cancelled before saving Excel output.")
+
+            if oldest_post_seen is not None:
+                JOB.add_log(
+                    "INFO",
+                    "Collection date span",
+                    f"Newest collected post: {newest_post_seen.strftime(scraper.DATE_INPUT_FORMAT) if newest_post_seen else 'unknown'} | "
+                    f"Oldest collected post: {oldest_post_seen.strftime(scraper.DATE_INPUT_FORMAT)}",
+                )
+            if not target_date_reached:
+                oldest_text = oldest_post_seen.strftime(scraper.DATE_INPUT_FORMAT) if oldest_post_seen else "unknown"
+                JOB.add_log(
+                    "WARN",
+                    "Target date not reached",
+                    f"Oldest collected post was {oldest_text}. Target start date is {config.start_date.strftime(scraper.DATE_INPUT_FORMAT)}.",
+                )
 
             filtered_posts = [
                 post for post in all_posts if scraper.post_matches_date_coverage(post, config.start_date, config.end_date)

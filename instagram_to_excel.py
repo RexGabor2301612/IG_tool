@@ -96,6 +96,7 @@ def getenv_int(name: str, default: int) -> int:
 SCROLL_STAGNANT_LIMIT_OVERRIDE = max(0, getenv_int("SCROLL_STAGNANT_LIMIT", 0))
 SCROLL_STOP_PROOF_ROUNDS = max(2, getenv_int("SCROLL_STOP_PROOF_ROUNDS", 2))
 SCROLL_ATTEMPTS_PER_ROUND = max(2, getenv_int("SCROLL_ATTEMPTS_PER_ROUND", 3))
+SCROLL_EXHAUSTION_CONFIRM_TIMEOUT = max(1500, getenv_int("SCROLL_EXHAUSTION_CONFIRM_TIMEOUT", 3500))
 SCROLL_STRATEGIES = ("anchor-step", "viewport-step", "bottom-jump")
 
 
@@ -321,6 +322,46 @@ def wait_for_profile_dom_growth(
         pass
 
     return get_profile_scroll_state(page)
+
+
+def confirm_profile_exhausted(
+    page,
+    reference_state: dict[str, int | bool],
+    timeout_ms: int = SCROLL_EXHAUSTION_CONFIRM_TIMEOUT,
+) -> tuple[bool, dict[str, int | bool]]:
+    try:
+        page.wait_for_function(
+            """(prev) => {
+                const doc = document.scrollingElement || document.documentElement;
+                const unique = new Set(
+                    Array.from(document.querySelectorAll("a[href*='/p/'], a[href*='/reel/']"))
+                        .map(anchor => (anchor.href || "").split("?")[0])
+                        .filter(Boolean)
+                );
+                const scrollTop = Number(doc.scrollTop || window.pageYOffset || 0);
+                const scrollHeight = Number(Math.max(
+                    doc.scrollHeight || 0,
+                    document.body ? document.body.scrollHeight : 0
+                ));
+                return (
+                    unique.size > prev.linkCount ||
+                    scrollHeight > prev.scrollHeight + 24 ||
+                    scrollTop > prev.scrollTop + 24
+                );
+            }""",
+            arg=reference_state,
+            timeout=timeout_ms,
+        )
+        return False, get_profile_scroll_state(page)
+    except Exception:
+        final_state = get_profile_scroll_state(page)
+        exhausted = bool(
+            final_state["atBottom"]
+            and final_state["linkCount"] <= reference_state["linkCount"]
+            and final_state["scrollHeight"] <= reference_state["scrollHeight"] + 24
+            and final_state["scrollTop"] <= reference_state["scrollTop"] + 24
+        )
+        return exhausted, final_state
 
 
 def click_button_if_visible(page, pattern: str, timeout_ms: int = 1200) -> bool:
@@ -1278,6 +1319,7 @@ def collect_post_links(
     page,
     max_posts: Optional[int] = None,
     scroll_rounds: int = MAX_SCROLL_ROUNDS,
+    target_start_date: Optional[datetime] = None,
     log_hook: Optional[LogHook] = None,
     progress_hook: Optional[ProgressHook] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
@@ -1287,19 +1329,40 @@ def collect_post_links(
     no_more_posts_proof = 0
     stagnant_limit = get_effective_stagnant_limit(scroll_rounds)
     min_rounds_before_stop = get_minimum_rounds_before_stop(scroll_rounds, stagnant_limit)
+    proof_rounds_required = SCROLL_STOP_PROOF_ROUNDS
+    coverage_mode = target_start_date is not None
+
+    if coverage_mode:
+        stagnant_limit = max(stagnant_limit, 12)
+        min_rounds_before_stop = max(
+            min_rounds_before_stop,
+            min(scroll_rounds, max(12, int(scroll_rounds * 0.7))),
+        )
+        proof_rounds_required = max(proof_rounds_required, 3)
 
     wait_for_profile_ready(page)
     print(
         "Starting collection: "
         f"max_rounds={scroll_rounds}, stagnant_limit={stagnant_limit}, "
-        f"proof_rounds={SCROLL_STOP_PROOF_ROUNDS}, min_rounds_before_stop={min_rounds_before_stop}"
+        f"proof_rounds={proof_rounds_required}, min_rounds_before_stop={min_rounds_before_stop}"
     )
     emit_log(
         log_hook,
         "INFO",
         "Collection config",
-        f"max_rounds={scroll_rounds}, stagnant_limit={stagnant_limit}, proof_rounds={SCROLL_STOP_PROOF_ROUNDS}.",
+        (
+            f"max_rounds={scroll_rounds}, stagnant_limit={stagnant_limit}, "
+            f"proof_rounds={proof_rounds_required}, coverage_start="
+            f"{target_start_date.strftime(DATE_INPUT_FORMAT) if target_start_date else 'none'}."
+        ),
     )
+    if coverage_mode:
+        emit_log(
+            log_hook,
+            "INFO",
+            "Continuing scroll to reach target date",
+            f"Using conservative early-stop thresholds to reach posts as old as {target_start_date.strftime(DATE_INPUT_FORMAT)}.",
+        )
 
     initial_found = collect_visible_post_links(page)
     for href in initial_found:
@@ -1324,6 +1387,7 @@ def collect_post_links(
         height_grew = False
         movement_grew = False
         at_bottom_with_no_growth = False
+        exhaustion_confirmed = False
         strategy_used = "none"
 
         for attempt_index in range(SCROLL_ATTEMPTS_PER_ROUND):
@@ -1364,6 +1428,8 @@ def collect_post_links(
                 and current_state["scrollHeight"] <= previous_state["scrollHeight"] + 24
                 and current_state["scrollTop"] <= previous_state["scrollTop"] + 24
             )
+            if at_bottom_with_no_growth:
+                exhaustion_confirmed, current_state = confirm_profile_exhausted(page, current_state)
             previous_state = current_state
 
         new_count = len(links) - before
@@ -1391,12 +1457,19 @@ def collect_post_links(
                 )
             else:
                 stagnant += 1
-                if at_bottom_with_no_growth:
+                if exhaustion_confirmed:
                     no_more_posts_proof += 1
                     reason = (
-                        f"+0 new links; at bottom with no DOM growth "
-                        f"(proof {no_more_posts_proof}/{SCROLL_STOP_PROOF_ROUNDS}, "
+                        f"+0 new links; at bottom with no DOM growth after confirmation wait "
+                        f"(proof {no_more_posts_proof}/{proof_rounds_required}, "
                         f"stagnant {stagnant}/{stagnant_limit}, total={len(links)})."
+                    )
+                    print(f"  Scroll {scroll_round}: {reason}")
+                elif at_bottom_with_no_growth:
+                    no_more_posts_proof = 0
+                    reason = (
+                        f"+0 new links; bottom reached but late lazy loading appeared possible "
+                        f"(continuing, stagnant {stagnant}/{stagnant_limit}, total={len(links)})."
                     )
                     print(f"  Scroll {scroll_round}: {reason}")
                 elif not scrolled:
@@ -1431,11 +1504,11 @@ def collect_post_links(
         if (
             scroll_round >= min_rounds_before_stop
             and stagnant >= stagnant_limit
-            and no_more_posts_proof >= SCROLL_STOP_PROOF_ROUNDS
+            and no_more_posts_proof >= proof_rounds_required
         ):
             print(
                 f"Stopping: strong proof of exhaustion after {scroll_round} rounds "
-                f"(stagnant={stagnant}/{stagnant_limit}, proof={no_more_posts_proof}/{SCROLL_STOP_PROOF_ROUNDS})"
+                f"(stagnant={stagnant}/{stagnant_limit}, proof={no_more_posts_proof}/{proof_rounds_required})"
             )
             emit_log(
                 log_hook,
@@ -1714,7 +1787,12 @@ def run_scrape(context, config: ScrapeConfig) -> None:
 
     prepare_profile_page(page, context, config.profile_url)
 
-    links = collect_post_links(page, MAX_POSTS, config.scroll_rounds)
+    links = collect_post_links(
+        page,
+        MAX_POSTS,
+        config.scroll_rounds,
+        target_start_date=config.start_date,
+    )
     print(f"Found {len(links)} posts.")
 
     all_posts = []
