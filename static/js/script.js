@@ -232,8 +232,12 @@ document.addEventListener("DOMContentLoaded", function () {
         browserModeDescription.textContent = modeNote;
         browserSessionUrlText.textContent = currentUrl || "-";
 
-        if (data.status === "preparing") {
+        if (data.status === "preparing" || data.status === "loading_session") {
             browserSessionStatusText.textContent = "Browser session created. Checking Instagram login state.";
+        } else if (data.status === "waiting_verification" || data.verificationRequired) {
+            browserSessionStatusText.textContent = data.localBrowserWindow
+                ? "Instagram verification required. Complete it in Chromium."
+                : "Instagram verification required, but this environment has no local browser window.";
         } else if (data.status === "waiting_login") {
             browserSessionStatusText.textContent = data.localBrowserWindow
                 ? "Browser opened. Complete Instagram login in Chromium."
@@ -256,8 +260,10 @@ document.addEventListener("DOMContentLoaded", function () {
             goStatusText.textContent = "Ready. Click GO / Start Extraction.";
         } else if (data.goRequested) {
             goStatusText.textContent = "GO signal sent. Starting extraction...";
-        } else if (data.status === "preparing") {
+        } else if (data.status === "preparing" || data.status === "loading_session") {
             goStatusText.textContent = "Preparing browser session.";
+        } else if (data.status === "waiting_verification" || data.verificationRequired) {
+            goStatusText.textContent = "Waiting for Instagram verification.";
         } else if (data.status === "waiting_login") {
             goStatusText.textContent = "Waiting for Instagram login.";
         } else if (data.status === "ready") {
@@ -273,7 +279,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
     function setButtonStates(data) {
         const status = data.status || "idle";
-        const activeStatuses = ["preparing", "running", "stopping", "waiting_login", "ready", "paused"].includes(status);
+        const activeStatuses = ["preparing", "loading_session", "running", "stopping", "waiting_login", "waiting_verification", "ready", "paused"].includes(status);
 
         confirmStartBtn.disabled = activeStatuses;
         runStartBtn.disabled = activeStatuses;
@@ -357,6 +363,10 @@ document.addEventListener("DOMContentLoaded", function () {
         }
         if (message.type === "login_completed" && message.data?.message) {
             showMessage("Login completed. Ready to start extraction.", "success");
+            return;
+        }
+        if (message.type === "verification_required" && message.data?.message) {
+            showMessage(message.data.message, "warn");
             return;
         }
         if (message.type === "job_completed") {

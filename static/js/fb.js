@@ -229,7 +229,7 @@ document.addEventListener("DOMContentLoaded", function () {
         browserModeDescription.textContent = modeNote;
         browserSessionUrlText.textContent = currentUrl || "-";
 
-        if (data.status === "preparing") {
+        if (data.status === "preparing" || data.status === "loading_session") {
             browserSessionStatusText.textContent = "Browser session created. Checking Facebook login state.";
         } else if (data.status === "waiting_verification" || data.verificationRequired) {
             browserSessionStatusText.textContent = data.localBrowserWindow
@@ -257,10 +257,10 @@ document.addEventListener("DOMContentLoaded", function () {
             goStatusText.textContent = "Ready. Click GO / Start Extraction.";
         } else if (data.goRequested) {
             goStatusText.textContent = "GO signal sent. Starting extraction...";
-        } else if (data.status === "preparing") {
+        } else if (data.status === "preparing" || data.status === "loading_session") {
             goStatusText.textContent = "Preparing browser session.";
         } else if (data.status === "waiting_verification" || data.verificationRequired) {
-            goStatusText.textContent = "Facebook verification required.";
+            goStatusText.textContent = "Waiting for Facebook verification.";
         } else if (data.status === "waiting_login") {
             goStatusText.textContent = "Waiting for Facebook login.";
         } else if (data.status === "ready") {
@@ -276,7 +276,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
     function setButtonStates(data) {
         const status = data.status || "idle";
-        const activeStatuses = ["preparing", "running", "waiting_login", "waiting_verification", "ready"].includes(status);
+        const activeStatuses = ["preparing", "loading_session", "running", "waiting_login", "waiting_verification", "ready"].includes(status);
 
         confirmStartBtn.disabled = activeStatuses;
         runStartBtn.disabled = activeStatuses;

@@ -21,7 +21,7 @@ INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
 BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
 
 PLAYWRIGHT_STORAGE_STATE = os.getenv("PLAYWRIGHT_STORAGE_STATE", "").strip() or None
-DEFAULT_STORAGE_STATE_FILE = Path(".auth/facebook-storage-state.json")
+DEFAULT_STORAGE_STATE_FILE = Path("storage_states/facebook_auth.json")
 PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").strip().lower() not in {"0", "false", "no", "off"}
 PLAYWRIGHT_AUTO_INSTALL = os.getenv("PLAYWRIGHT_AUTO_INSTALL", "true").strip().lower() not in {"0", "false", "no", "off"}
 RUNNING_ON_RENDER = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") or os.getenv("RENDER_EXTERNAL_URL"))
@@ -145,8 +145,34 @@ def get_storage_state_path(require_exists: bool = False) -> Optional[Path]:
     return path
 
 
+def has_saved_storage_state() -> bool:
+    return get_storage_state_path(require_exists=True) is not None
+
+
+def storage_state_label() -> str:
+    path = get_storage_state_path()
+    return str(path) if path is not None else ""
+
+
 def has_login_credentials() -> bool:
     return bool(FACEBOOK_USERNAME and FACEBOOK_PASSWORD)
+
+
+def load_or_create_context(browser):
+    context_options = {
+        "viewport": {"width": 1440, "height": 960},
+        "locale": "en-US",
+        "user_agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Safari/537.36"
+        ),
+    }
+    storage_path = get_storage_state_path(require_exists=True)
+    if storage_path is not None:
+        context_options["storage_state"] = str(storage_path)
+    context = browser.new_context(**context_options)
+    return context, storage_path
 
 
 def wait_for_selector(page, selector: str, timeout_ms: int) -> bool:
@@ -382,6 +408,41 @@ def page_ready_for_collection(page) -> bool:
     return wait_for_selector(page, FEED_READY_SELECTOR, 800)
 
 
+def validate_session(page, context=None, target_url: str = "") -> dict[str, Any]:
+    checkpoint_required, checkpoint_reason = detect_checkpoint_or_verification(page)
+    if checkpoint_required:
+        return {
+            "state": "verification_required",
+            "reason": checkpoint_reason,
+            "url": getattr(page, "url", target_url) or target_url,
+            "cookiesPresent": bool(context and has_authenticated_session(context)),
+        }
+
+    login_required, login_reason = detect_login_gate(page)
+    if login_required:
+        return {
+            "state": "login_required",
+            "reason": login_reason,
+            "url": getattr(page, "url", target_url) or target_url,
+            "cookiesPresent": bool(context and has_authenticated_session(context)),
+        }
+
+    if page_ready_for_collection(page):
+        return {
+            "state": "ready",
+            "reason": "Facebook page or feed content is visible.",
+            "url": getattr(page, "url", target_url) or target_url,
+            "cookiesPresent": bool(context and has_authenticated_session(context)),
+        }
+
+    return {
+        "state": "unknown",
+        "reason": "Facebook session could not be confirmed yet.",
+        "url": getattr(page, "url", target_url) or target_url,
+        "cookiesPresent": bool(context and has_authenticated_session(context)),
+    }
+
+
 def manual_login_url(target_url: str) -> str:
     return f"https://www.facebook.com/login.php?next={quote(target_url, safe='')}"
 
@@ -404,7 +465,7 @@ def save_storage_state(context, log_hook: Optional[LogHook] = None) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         context.storage_state(path=str(path))
-        emit_log(log_hook, "INFO", "Session saved", str(path))
+        emit_log(log_hook, "INFO", "Storage state saved", str(path))
     except Exception as exc:
         emit_log(log_hook, "WARN", "Session save skipped", type(exc).__name__)
 
@@ -479,19 +540,7 @@ def launch_browser(playwright):
         install_playwright_browsers()
         browser = playwright.chromium.launch(**launch_options)
 
-    context_options = {
-        "viewport": {"width": 1440, "height": 960},
-        "locale": "en-US",
-        "user_agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/126.0.0.0 Safari/537.36"
-        ),
-    }
-    storage_path = get_storage_state_path(require_exists=True)
-    if storage_path is not None:
-        context_options["storage_state"] = str(storage_path)
-    context = browser.new_context(**context_options)
+    context, _ = load_or_create_context(browser)
     return browser, context
 
 

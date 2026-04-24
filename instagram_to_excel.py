@@ -23,6 +23,7 @@ OUTPUT_FILE = "instagram_grouped_by_month.xlsx"
 # Use PLAYWRIGHT_STORAGE_STATE=/path/to/state.json only if you intentionally
 # provide an exported login state file in your deployment environment.
 PLAYWRIGHT_STORAGE_STATE = os.getenv("PLAYWRIGHT_STORAGE_STATE", "").strip() or None
+DEFAULT_STORAGE_STATE_FILE = Path("storage_states/instagram_auth.json")
 PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").strip().lower() not in {"0", "false", "no", "off"}
 PLAYWRIGHT_AUTO_INSTALL = os.getenv("PLAYWRIGHT_AUTO_INSTALL", "true").strip().lower() not in {"0", "false", "no", "off"}
 RUNNING_ON_RENDER = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") or os.getenv("RENDER_EXTERNAL_URL"))
@@ -190,18 +191,54 @@ def emit_progress(progress_hook: Optional[ProgressHook], scroll_round: int, tota
 
 
 def get_storage_state_path(require_exists: bool = False) -> Optional[Path]:
-    if not PLAYWRIGHT_STORAGE_STATE:
+    if PLAYWRIGHT_STORAGE_STATE:
+        path = Path(PLAYWRIGHT_STORAGE_STATE)
+    elif uses_local_browser_window():
+        path = DEFAULT_STORAGE_STATE_FILE
+    else:
         return None
-
-    path = Path(PLAYWRIGHT_STORAGE_STATE)
     if require_exists and not path.exists():
         return None
 
     return path
 
 
+def has_saved_storage_state() -> bool:
+    return get_storage_state_path(require_exists=True) is not None
+
+
+def storage_state_label() -> str:
+    path = get_storage_state_path()
+    return str(path) if path is not None else ""
+
+
 def has_login_credentials() -> bool:
     return bool(INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD)
+
+
+def load_or_create_context(browser):
+    context_options = {
+        "viewport": {"width": 1400, "height": 900},
+        "locale": "en-US",
+        "timezone_id": "Asia/Manila",
+        "ignore_https_errors": True,
+    }
+
+    state_path = get_storage_state_path(require_exists=True)
+    if state_path is not None:
+        context_options["storage_state"] = str(state_path)
+
+    context = browser.new_context(**context_options)
+    return context, state_path
+
+
+def has_authenticated_session(context) -> bool:
+    try:
+        cookies = context.cookies()
+    except Exception:
+        return False
+    session_cookie_names = {"sessionid", "ds_user_id"}
+    return any(cookie.get("name") in session_cookie_names for cookie in cookies)
 
 
 def wait_for_selector(page, selector: str, timeout_ms: int) -> bool:
@@ -256,11 +293,82 @@ def detect_login_gate(page) -> tuple[bool, str]:
     return False, ""
 
 
+def detect_checkpoint_or_verification(page) -> tuple[bool, str]:
+    current_url = ""
+    try:
+        current_url = page.url or ""
+    except Exception:
+        current_url = ""
+
+    if any(token in current_url for token in ["/challenge/", "two_factor", "onetap", "/accounts/suspended/"]):
+        return True, "Instagram verification or challenge page detected."
+
+    try:
+        body_text = page.locator("body").inner_text(timeout=500).lower()
+    except Exception:
+        body_text = ""
+
+    challenge_phrases = [
+        "confirm it's you",
+        "help us confirm you own this account",
+        "security code",
+        "enter the code",
+        "suspicious login attempt",
+        "challenge required",
+        "captcha",
+        "recaptcha",
+        "check your notifications on another device",
+        "approve login using",
+    ]
+    if any(phrase in body_text for phrase in challenge_phrases):
+        return True, "Instagram requires verification before the profile can be used."
+
+    return False, ""
+
+
 def profile_ready_for_collection(page) -> bool:
+    checkpoint_required, _ = detect_checkpoint_or_verification(page)
+    if checkpoint_required:
+        return False
     login_required, _ = detect_login_gate(page)
     if login_required:
         return False
     return profile_grid_visible(page, 350)
+
+
+def validate_session(page, context=None, profile_url: str = "") -> dict[str, Any]:
+    checkpoint_required, checkpoint_reason = detect_checkpoint_or_verification(page)
+    if checkpoint_required:
+        return {
+            "state": "verification_required",
+            "reason": checkpoint_reason,
+            "url": getattr(page, "url", profile_url) or profile_url,
+            "cookiesPresent": bool(context and has_authenticated_session(context)),
+        }
+
+    login_required, login_reason = detect_login_gate(page)
+    if login_required:
+        return {
+            "state": "login_required",
+            "reason": login_reason,
+            "url": getattr(page, "url", profile_url) or profile_url,
+            "cookiesPresent": bool(context and has_authenticated_session(context)),
+        }
+
+    if profile_ready_for_collection(page):
+        return {
+            "state": "ready",
+            "reason": "Instagram profile grid is visible.",
+            "url": getattr(page, "url", profile_url) or profile_url,
+            "cookiesPresent": bool(context and has_authenticated_session(context)),
+        }
+
+    return {
+        "state": "unknown",
+        "reason": "Instagram session could not be confirmed yet.",
+        "url": getattr(page, "url", profile_url) or profile_url,
+        "cookiesPresent": bool(context and has_authenticated_session(context)),
+    }
 
 
 def collect_visible_post_links(page) -> List[str]:
@@ -732,7 +840,7 @@ def save_storage_state(context, log_hook: Optional[LogHook] = None) -> None:
     try:
         state_path.parent.mkdir(parents=True, exist_ok=True)
         context.storage_state(path=str(state_path))
-        emit_log(log_hook, "INFO", "Session saved", str(state_path))
+        emit_log(log_hook, "INFO", "Storage state saved", str(state_path))
     except Exception as exc:
         emit_log(log_hook, "WARN", "Session save skipped", type(exc).__name__)
 
@@ -2355,18 +2463,7 @@ def launch_browser(playwright):
         install_playwright_browsers()
         browser = playwright.chromium.launch(**launch_options)
 
-    context_options = {
-        "viewport": {"width": 1400, "height": 900},
-        "locale": "en-US",
-        "timezone_id": "Asia/Manila",
-        "ignore_https_errors": True,
-    }
-
-    state_path = get_storage_state_path(require_exists=True)
-    if state_path is not None:
-        context_options["storage_state"] = str(state_path)
-
-    context = browser.new_context(**context_options)
+    context, _ = load_or_create_context(browser)
     return browser, context
 
 
