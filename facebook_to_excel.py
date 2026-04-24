@@ -21,6 +21,7 @@ INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
 BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
 
 PLAYWRIGHT_STORAGE_STATE = os.getenv("PLAYWRIGHT_STORAGE_STATE", "").strip() or None
+DEFAULT_STORAGE_STATE_FILE = Path(".auth/facebook-storage-state.json")
 PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").strip().lower() not in {"0", "false", "no", "off"}
 PLAYWRIGHT_AUTO_INSTALL = os.getenv("PLAYWRIGHT_AUTO_INSTALL", "true").strip().lower() not in {"0", "false", "no", "off"}
 RUNNING_ON_RENDER = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") or os.getenv("RENDER_EXTERNAL_URL"))
@@ -63,7 +64,8 @@ POST_LINK_SELECTOR = (
     "a[href*='/photo.php'], "
     "a[href*='/watch/?v=']"
 )
-PAGE_READY_SELECTOR = f"{POST_LINK_SELECTOR}, div[role='feed'], div[role='main']"
+FEED_READY_SELECTOR = "div[role='feed'], div[role='feed'] div[role='article']"
+PAGE_READY_SELECTOR = f"{POST_LINK_SELECTOR}, {FEED_READY_SELECTOR}"
 LOGIN_FORM_SELECTOR = "input[name='email'], input[name='pass'], form[action*='login']"
 
 LogHook = Callable[[str, str, str], None]
@@ -132,9 +134,12 @@ def preview_input_supported() -> bool:
 
 
 def get_storage_state_path(require_exists: bool = False) -> Optional[Path]:
-    if not PLAYWRIGHT_STORAGE_STATE:
+    if PLAYWRIGHT_STORAGE_STATE:
+        path = Path(PLAYWRIGHT_STORAGE_STATE)
+    elif uses_local_browser_window():
+        path = DEFAULT_STORAGE_STATE_FILE
+    else:
         return None
-    path = Path(PLAYWRIGHT_STORAGE_STATE)
     if require_exists and not path.exists():
         return None
     return path
@@ -249,9 +254,60 @@ def profile_content_visible(page, timeout_ms: int = 500) -> bool:
     return wait_for_selector(page, PAGE_READY_SELECTOR, timeout_ms)
 
 
+def visible_post_anchor_count(page) -> int:
+    try:
+        return int(page.locator(POST_LINK_SELECTOR).count())
+    except Exception:
+        return 0
+
+
+def has_authenticated_session(context) -> bool:
+    try:
+        cookies = context.cookies()
+    except Exception:
+        return False
+    return any(cookie.get("name") == "c_user" for cookie in cookies)
+
+
+def detect_checkpoint_or_verification(page) -> tuple[bool, str]:
+    current_url = ""
+    try:
+        current_url = page.url or ""
+    except Exception:
+        current_url = ""
+
+    if any(token in current_url for token in ["/checkpoint/", "/checkpoint", "/login/identify", "/two_step_verification"]):
+        return True, "Facebook checkpoint or verification page detected."
+
+    try:
+        body_text = page.locator("body").inner_text(timeout=600).lower()
+    except Exception:
+        body_text = ""
+
+    challenge_phrases = [
+        "confirm your identity",
+        "check your notifications on another device",
+        "enter the code we sent",
+        "approve from another device",
+        "security check",
+        "suspicious login attempt",
+        "checkpoint",
+        "verify your account",
+        "review recent login",
+    ]
+    if any(phrase in body_text for phrase in challenge_phrases):
+        return True, "Facebook requires verification before the page can be used."
+
+    return False, ""
+
+
 def detect_login_gate(page) -> tuple[bool, str]:
     if wait_for_selector(page, LOGIN_FORM_SELECTOR, 350):
         return True, "Facebook login form detected."
+
+    blocked, blocked_reason = detect_checkpoint_or_verification(page)
+    if blocked:
+        return True, blocked_reason
 
     current_url = ""
     try:
@@ -274,11 +330,24 @@ def detect_login_gate(page) -> tuple[bool, str]:
         "continue on facebook",
         "create new account",
         "continue reading this story by logging in",
+        "see more from",
+        "log in to see more",
     ]
-    if any(phrase in body_text for phrase in blocking_phrases) and not profile_content_visible(page, 200):
+    if any(phrase in body_text for phrase in blocking_phrases):
         return True, "Facebook login wall detected."
 
-    if not profile_content_visible(page, 200) and ("log in" in body_text and "sign up" in body_text):
+    login_cta_visible = False
+    try:
+        login_cta_visible = page.locator(
+            "a[href*='/login'], a[href*='login.php'], button[name='login'], form[action*='login'] button"
+        ).count() > 0
+    except Exception:
+        login_cta_visible = False
+
+    if login_cta_visible and ("log in" in body_text or "sign up" in body_text):
+        return True, "Facebook requires login before deeper content can be collected."
+
+    if ("log in" in body_text and "sign up" in body_text) and visible_post_anchor_count(page) < 5:
         return True, "Facebook public gate detected."
 
     return False, ""
@@ -288,7 +357,9 @@ def page_ready_for_collection(page) -> bool:
     login_required, _ = detect_login_gate(page)
     if login_required:
         return False
-    return profile_content_visible(page, 600)
+    if visible_post_anchor_count(page) > 0:
+        return True
+    return wait_for_selector(page, FEED_READY_SELECTOR, 800)
 
 
 def manual_login_url(target_url: str) -> str:
@@ -344,7 +415,7 @@ def auto_login_if_needed(page, context, target_url: str, log_hook: Optional[LogH
     click_button_if_visible(page, r"not now|skip|maybe later")
     page.goto(target_url, wait_until="domcontentloaded", timeout=POST_GOTO_TIMEOUT)
 
-    if page_ready_for_collection(page):
+    if page_ready_for_collection(page) and has_authenticated_session(context):
         save_storage_state(context, log_hook)
         emit_log(log_hook, "SUCCESS", "Facebook login", "Session is ready and the target page is visible.")
         return True

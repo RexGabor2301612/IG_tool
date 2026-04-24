@@ -485,6 +485,9 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
     login_form_logged = False
     login_page_opened = False
     returned_to_target = False
+    login_submit_logged = False
+    login_loop_logged = False
+    verification_logged = False
 
     while time.monotonic() < deadline:
         if JOB.should_cancel():
@@ -493,11 +496,36 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
         drain_control_commands(page)
         sync_browser_url(page, target_url)
 
+        checkpoint_required, checkpoint_reason = scraper.detect_checkpoint_or_verification(page)
+        if checkpoint_required:
+            JOB.update(
+                status="waiting_login",
+                active_task="Waiting for Facebook verification",
+                browser_session_created=True,
+                page_ready=False,
+                login_required=True,
+                ready_to_scrape=False,
+                browser_url=current_page_url(page, target_url),
+                current_post=current_page_url(page, target_url),
+            )
+            if not verification_logged:
+                JOB.add_log("WARN", "Checkpoint/verification required", checkpoint_reason)
+                JOB.add_log("WARN", "Waiting for verification", "Please complete Facebook verification manually in the opened browser.")
+                verification_logged = True
+            time.sleep(0.35)
+            continue
+
         if scraper.page_ready_for_collection(page):
-            scraper.save_storage_state(context, JOB.add_log)
+            JOB.add_log("INFO", "Checking session cookies", "Verifying whether Facebook session cookies are present.")
+            cookies_present = scraper.has_authenticated_session(context)
+            if cookies_present:
+                scraper.save_storage_state(context, JOB.add_log)
             mark_page_ready(page, target_url, waiting_for_go=waiting_for_go)
-            JOB.add_log("SUCCESS", "Login detected", "Facebook page/feed is visible in the existing browser session.")
-            JOB.add_log("SUCCESS", "Page ready", "Facebook content is accessible after login.")
+            JOB.add_log("SUCCESS", "Login successful, page ready", "Facebook page/feed is visible in the existing browser session.")
+            if cookies_present:
+                JOB.add_log("SUCCESS", "Session cookies detected", "Facebook authentication cookies are present and the session can be reused.")
+            else:
+                JOB.add_log("INFO", "Public content ready", "The target page appears publicly accessible without a saved authenticated session.")
             if waiting_for_go:
                 JOB.add_log("INFO", "Ready for extraction", "Login completed. Click GO / START EXTRACTION to continue.")
             broadcast_dashboard_event("login_completed", {"message": "Facebook login completed. Page ready.", "url": current_page_url(page, target_url)})
@@ -513,6 +541,9 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
                 if not login_form_logged:
                     JOB.add_log("INFO", "Login form detected", "Facebook login form is visible in the current browser tab.")
                     login_form_logged = True
+                if login_submit_logged and not login_loop_logged:
+                    JOB.add_log("WARN", "Login loop detected", "The Facebook login form reappeared after submission. The session is not established yet or Facebook requires extra verification.")
+                    login_loop_logged = True
                 login_page_opened = True
             elif not login_page_opened:
                 try:
@@ -526,12 +557,17 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
             continue
 
         current_url = current_page_url(page, target_url)
+        if login_page_opened and login_form_logged and not login_form_visible and not login_submit_logged:
+            JOB.add_log("INFO", "Login submitted", "The Facebook login form disappeared. Waiting for navigation, session cookies, and page readiness.")
+            login_submit_logged = True
+
         if (
             not returned_to_target
             and "facebook.com" in current_url
             and "/login" not in current_url
             and "/checkpoint/" not in current_url
             and "recover" not in current_url
+            and scraper.has_authenticated_session(context)
             and current_url.rstrip("/") != target_url.rstrip("/")
         ):
             try:
@@ -620,6 +656,8 @@ def wait_until_page_ready_or_login_completed(page, context, target_url: str) -> 
     page.goto(target_url, wait_until="domcontentloaded", timeout=scraper.POST_GOTO_TIMEOUT)
     sync_browser_url(page, target_url)
     JOB.add_log("INFO", "Checking login state", "Checking whether Facebook requires login before extraction.")
+    if scraper.has_authenticated_session(context):
+        JOB.add_log("INFO", "Session restored", "Loaded saved Facebook session cookies into the current browser context.")
 
     if JOB.should_cancel():
         raise ScrapeCancelled("Cancelled while preparing Facebook target.")

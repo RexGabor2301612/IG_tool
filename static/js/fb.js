@@ -232,9 +232,15 @@ document.addEventListener("DOMContentLoaded", function () {
         if (data.status === "preparing") {
             browserSessionStatusText.textContent = "Browser session created. Checking Facebook login state.";
         } else if (data.status === "waiting_login") {
-            browserSessionStatusText.textContent = data.localBrowserWindow
-                ? "Browser opened. Complete Facebook login in Chromium."
-                : "Facebook login is required, but this environment has no local browser window.";
+            if ((data.activeTask || "").toLowerCase().includes("verification")) {
+                browserSessionStatusText.textContent = data.localBrowserWindow
+                    ? "Facebook requires verification. Complete it in Chromium before extraction can continue."
+                    : "Facebook requires verification, but this environment has no local browser window.";
+            } else {
+                browserSessionStatusText.textContent = data.localBrowserWindow
+                    ? "Browser opened. Complete Facebook login in Chromium."
+                    : "Facebook login is required, but this environment has no local browser window.";
+            }
         } else if (data.status === "ready") {
             browserSessionStatusText.textContent = "Facebook page ready. Click GO / Start Extraction.";
         } else if (data.status === "running") {
@@ -256,7 +262,9 @@ document.addEventListener("DOMContentLoaded", function () {
         } else if (data.status === "preparing") {
             goStatusText.textContent = "Preparing browser session.";
         } else if (data.status === "waiting_login") {
-            goStatusText.textContent = "Waiting for Facebook login.";
+            goStatusText.textContent = (data.activeTask || "").toLowerCase().includes("verification")
+                ? "Waiting for Facebook verification."
+                : "Waiting for Facebook login.";
         } else if (data.status === "ready") {
             goStatusText.textContent = "Facebook page ready. Waiting for GO signal.";
         } else if (data.status === "running") {
