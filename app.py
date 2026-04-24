@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 import threading
 import time
 import os
@@ -9,12 +11,14 @@ from pathlib import Path
 from typing import Any, Optional
 
 from flask import Flask, jsonify, render_template, request, send_file
+from flask_sock import Sock
 from playwright.sync_api import sync_playwright
 
 import instagram_to_excel as scraper
 
 
 app = Flask(__name__)
+sock = Sock(app)
 
 
 class ScrapeCancelled(Exception):
@@ -29,6 +33,133 @@ class WebScrapeConfig:
     end_date: Optional[datetime]
     output_file: str
     overwrite: bool = False
+
+
+class DashboardClient:
+    def __init__(self, ws) -> None:
+        self.ws = ws
+        self.lock = threading.Lock()
+
+    def send(self, payload: dict[str, Any]) -> None:
+        with self.lock:
+            self.ws.send(json.dumps(payload))
+
+
+class DashboardHub:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.clients: list[DashboardClient] = []
+
+    def register(self, ws) -> DashboardClient:
+        client = DashboardClient(ws)
+        with self.lock:
+            self.clients.append(client)
+        return client
+
+    def unregister(self, client: DashboardClient) -> None:
+        with self.lock:
+            if client in self.clients:
+                self.clients.remove(client)
+
+    def broadcast(self, event_type: str, data: dict[str, Any]) -> None:
+        with self.lock:
+            clients = list(self.clients)
+
+        stale: list[DashboardClient] = []
+        payload = {"type": event_type, "data": data}
+        for client in clients:
+            try:
+                client.send(payload)
+            except Exception:
+                stale.append(client)
+
+        if stale:
+            with self.lock:
+                for client in stale:
+                    if client in self.clients:
+                        self.clients.remove(client)
+
+
+class LivePreviewState:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.reset()
+
+    def reset(self, note: str = "Waiting for live browser preview.") -> None:
+        self.frame_b64 = ""
+        self.width = 0
+        self.height = 0
+        self.note = note
+        self.url = ""
+        self.updated_at = ""
+        self.last_capture_monotonic = 0.0
+
+    def update(self, *, frame_b64: str, width: int, height: int, note: str, url: str) -> dict[str, Any]:
+        payload = {
+            "image": frame_b64,
+            "width": width,
+            "height": height,
+            "note": note,
+            "url": url,
+            "updatedAt": datetime.now().strftime("%H:%M:%S"),
+        }
+        with self.lock:
+            self.frame_b64 = frame_b64
+            self.width = width
+            self.height = height
+            self.note = note
+            self.url = url
+            self.updated_at = payload["updatedAt"]
+            self.last_capture_monotonic = time.monotonic()
+        return payload
+
+    def snapshot(self) -> Optional[dict[str, Any]]:
+        with self.lock:
+            return {
+                "image": self.frame_b64,
+                "width": self.width,
+                "height": self.height,
+                "note": self.note,
+                "url": self.url,
+                "updatedAt": self.updated_at,
+            }
+
+    def can_capture(self, interval_seconds: float) -> bool:
+        with self.lock:
+            return time.monotonic() - self.last_capture_monotonic >= interval_seconds
+
+
+class LiveCommandBus:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.queue: list[dict[str, Any]] = []
+        self.paused = False
+
+    def reset(self) -> None:
+        with self.lock:
+            self.queue = []
+            self.paused = False
+
+    def push(self, command: dict[str, Any]) -> None:
+        action = str(command.get("action", "")).strip()
+        with self.lock:
+            if action == "pause":
+                self.paused = True
+                return
+            if action == "resume":
+                self.paused = False
+                return
+            self.queue.append(command)
+
+    def drain(self) -> list[dict[str, Any]]:
+        with self.lock:
+            items = list(self.queue)
+            self.queue.clear()
+            return items
+
+    def is_paused(self) -> bool:
+        with self.lock:
+            return self.paused
 
 
 class ScrapeJobState:
@@ -63,22 +194,24 @@ class ScrapeJobState:
         self.finished_at: Optional[float] = None
 
     def add_log(self, level: str, action: str, details: str = "") -> None:
+        entry: dict[str, str]
         with self.lock:
-            self.logs.insert(
-                0,
-                {
-                    "time": datetime.now().strftime("%H:%M:%S"),
-                    "level": level.upper(),
-                    "action": action,
-                    "details": details,
-                },
-            )
+            entry = {
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "level": level.upper(),
+                "action": action,
+                "details": details,
+            }
+            self.logs.insert(0, entry)
             self.logs = self.logs[:250]
+        broadcast_dashboard_event("log", entry)
+        broadcast_job_snapshot(include_logs=False)
 
     def update(self, **kwargs: Any) -> None:
         with self.lock:
             for key, value in kwargs.items():
                 setattr(self, key, value)
+        broadcast_job_snapshot(include_logs=False)
 
     def request_cancel(self) -> bool:
         with self.lock:
@@ -94,7 +227,7 @@ class ScrapeJobState:
         with self.lock:
             return self.cancel_requested
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self, include_logs: bool = True) -> dict[str, Any]:
         with self.lock:
             eligible_total = self.posts_in_range if self.posts_in_range > 0 else (self.posts_success + self.failed_extractions)
             if eligible_total > 0:
@@ -126,16 +259,37 @@ class ScrapeJobState:
                 "health": health,
                 "outputFile": self.output_file,
                 "config": self.config_summary,
-                "logs": list(self.logs),
                 "cancelRequested": self.cancel_requested,
                 "canDownload": self.status == "completed" and bool(self.output_file) and Path(self.output_file).exists(),
             }
+            if include_logs:
+                snapshot["logs"] = list(self.logs)
+            return snapshot
 
 
 JOB = ScrapeJobState()
 JOB_THREAD: Optional[threading.Thread] = None
+DASHBOARD_HUB = DashboardHub()
+PREVIEW = LivePreviewState()
+CONTROL_BUS = LiveCommandBus()
 LOGIN_READY_TIMEOUT = 180000
 HEADLESS_PROFILE_READY_TIMEOUT = 45000
+PREVIEW_INTERVAL_SECONDS = 0.8
+PREVIEW_JPEG_QUALITY = 55
+
+
+def broadcast_dashboard_event(event_type: str, data: dict[str, Any]) -> None:
+    DASHBOARD_HUB.broadcast(event_type, data)
+
+
+def broadcast_job_snapshot(include_logs: bool = False) -> None:
+    broadcast_dashboard_event("snapshot", JOB.snapshot(include_logs=include_logs))
+
+
+def broadcast_preview_snapshot() -> None:
+    preview_snapshot = PREVIEW.snapshot()
+    if preview_snapshot is not None:
+        broadcast_dashboard_event("preview", preview_snapshot)
 
 
 def empty_stats() -> list[dict[str, str]]:
@@ -161,7 +315,7 @@ def dashboard_features() -> list[dict[str, str]]:
         },
         {
             "title": "Live Activity Logs",
-            "description": "The dashboard polls backend job state for scroll progress, current post, warnings, and completion status.",
+            "description": "The dashboard streams browser frames, logs, and status updates in real time over WebSocket.",
             "icon": "LOG",
         },
         {
@@ -271,6 +425,159 @@ def config_to_summary(config: WebScrapeConfig) -> dict[str, str]:
     }
 
 
+def emit_preview_frame(page, note: str, force: bool = False) -> None:
+    if page is None:
+        return
+    if not force and not PREVIEW.can_capture(PREVIEW_INTERVAL_SECONDS):
+        return
+
+    try:
+        image_bytes = page.screenshot(type="jpeg", quality=PREVIEW_JPEG_QUALITY, animations="disabled", caret="hide")
+        viewport = page.viewport_size or {"width": 1400, "height": 900}
+        payload = PREVIEW.update(
+            frame_b64=base64.b64encode(image_bytes).decode("ascii"),
+            width=int(viewport.get("width", 1400)),
+            height=int(viewport.get("height", 900)),
+            note=note,
+            url=page.url or "",
+        )
+        broadcast_dashboard_event("preview", payload)
+    except Exception:
+        pass
+
+
+def normalize_preview_key(key: str) -> Optional[str]:
+    if key == " ":
+        return "Space"
+    allowed = {
+        "Enter",
+        "Tab",
+        "Backspace",
+        "Escape",
+        "Delete",
+        "PageDown",
+        "PageUp",
+        "Home",
+        "End",
+        "ArrowUp",
+        "ArrowDown",
+        "ArrowLeft",
+        "ArrowRight",
+    }
+    return key if key in allowed else None
+
+
+def execute_control_command(page, command: dict[str, Any]) -> None:
+    action = str(command.get("action", "")).strip()
+    if not action:
+        return
+
+    if action == "preview_click":
+        x = int(command.get("x", 0))
+        y = int(command.get("y", 0))
+        page.mouse.click(x, y)
+        emit_preview_frame(page, f"Preview click ({x}, {y})", force=True)
+        return
+
+    if action == "preview_key":
+        text = str(command.get("text", ""))
+        key = str(command.get("key", ""))
+        normalized_key = normalize_preview_key(key)
+        if text and len(text) == 1 and not normalized_key:
+            page.keyboard.insert_text(text)
+        elif normalized_key:
+            page.keyboard.press(normalized_key)
+        emit_preview_frame(page, f"Preview key: {key or text}", force=True)
+        return
+
+    if action == "scroll_up":
+        page.mouse.wheel(0, -1600)
+        emit_preview_frame(page, "Manual scroll up", force=True)
+        return
+
+    if action == "scroll_down":
+        page.mouse.wheel(0, 1600)
+        emit_preview_frame(page, "Manual scroll down", force=True)
+        return
+
+    if action == "force_next_scroll":
+        page.mouse.wheel(0, 2200)
+        emit_preview_frame(page, "Forced scroll", force=True)
+        return
+
+    if action == "capture_screenshot":
+        emit_preview_frame(page, "Manual screenshot capture", force=True)
+
+
+def drain_control_commands(page) -> None:
+    for command in CONTROL_BUS.drain():
+        try:
+            execute_control_command(page, command)
+        except Exception as exc:
+            JOB.add_log("WARN", "Control command failed", f"{command.get('action', 'unknown')} ({type(exc).__name__})")
+
+
+def wait_if_paused(page, active_task: str) -> None:
+    if not CONTROL_BUS.is_paused():
+        return
+
+    JOB.update(status="paused", active_task=f"Paused: {active_task}")
+    JOB.add_log("WARN", "Paused", f"Paused during {active_task.lower()}.")
+    while CONTROL_BUS.is_paused():
+        if JOB.should_cancel():
+            raise ScrapeCancelled("Cancelled while paused.")
+        drain_control_commands(page)
+        emit_preview_frame(page, f"Paused: {active_task}")
+        time.sleep(0.25)
+
+    JOB.update(status="running", active_task=active_task)
+    JOB.add_log("INFO", "Resumed", f"Resumed {active_task.lower()}.")
+    emit_preview_frame(page, f"Resumed: {active_task}", force=True)
+
+
+def pump_live_runtime(page, active_task: str, note: str, force_preview: bool = False) -> None:
+    wait_if_paused(page, active_task)
+    drain_control_commands(page)
+    emit_preview_frame(page, note, force=force_preview)
+
+
+def wait_for_user_login(page, context, profile_url: str) -> None:
+    JOB.update(status="waiting_login", active_task="Waiting for user login")
+    JOB.add_log("WARN", "Waiting for user login", "Instagram login is required. Use the live preview to sign in.")
+    emit_preview_frame(page, "Waiting for user login", force=True)
+
+    deadline = time.monotonic() + (LOGIN_READY_TIMEOUT / 1000)
+    last_profile_refresh = 0.0
+    while time.monotonic() < deadline:
+        if JOB.should_cancel():
+            raise ScrapeCancelled("Cancelled while waiting for user login.")
+
+        wait_if_paused(page, "Waiting for user login")
+        drain_control_commands(page)
+        emit_preview_frame(page, "Waiting for user login")
+
+        if scraper.wait_for_selector(page, scraper.PROFILE_GRID_SELECTOR, 400):
+            scraper.save_storage_state(context, JOB.add_log)
+            JOB.update(status="running", active_task="Profile ready")
+            JOB.add_log("SUCCESS", "User login detected", "Profile grid is visible; scraping will resume.")
+            emit_preview_frame(page, "Login complete", force=True)
+            return
+
+        if time.monotonic() - last_profile_refresh >= 4:
+            current_url = page.url or ""
+            if "instagram.com" in current_url and "accounts/login" not in current_url and "/challenge/" not in current_url:
+                try:
+                    page.goto(profile_url, wait_until="domcontentloaded", timeout=scraper.POST_GOTO_TIMEOUT)
+                    emit_preview_frame(page, "Refreshing profile after login")
+                except Exception:
+                    pass
+            last_profile_refresh = time.monotonic()
+
+        time.sleep(0.3)
+
+    raise TimeoutError("Instagram login was required, but the session was not completed before timeout.")
+
+
 def collect_post_links_with_progress(page, config: WebScrapeConfig) -> list[str]:
     JOB.update(active_task="Collecting post links", total_scroll_rounds=config.scroll_rounds)
     JOB.add_log("INFO", "Profile ready", "Starting profile grid scan.")
@@ -283,6 +590,18 @@ def collect_post_links_with_progress(page, config: WebScrapeConfig) -> list[str]
             posts_found=posts_found,
             progress=progress_value,
         )
+
+    def live_hook(runtime_page, phase: str, payload: dict[str, Any]) -> None:
+        round_text = payload.get("round")
+        note = {
+            "initial-grid": f"Initial grid loaded: {payload.get('totalLinks', 0)} links",
+            "scroll-round": (
+                f"Scroll Round {round_text}/{config.scroll_rounds}: "
+                f"+{payload.get('newLinks', 0)} new links, total {payload.get('totalLinks', 0)}"
+            ),
+            "scroll-stop": f"Scroll stop: {payload.get('reason', 'Complete')}",
+        }.get(phase, f"Collecting post links ({phase})")
+        pump_live_runtime(runtime_page, "Collecting post links", note, force_preview=phase != "scroll-round")
 
     diagnostics: dict[str, Any] = {}
     probe_page = page.context.new_page()
@@ -299,6 +618,7 @@ def collect_post_links_with_progress(page, config: WebScrapeConfig) -> list[str]
             progress_hook=progress_hook,
             cancel_check=JOB.should_cancel,
             diagnostics=diagnostics,
+            live_hook=live_hook,
         )
         oldest = diagnostics.get("oldestVisibleDate")
         newest = diagnostics.get("newestVisibleDate")
@@ -327,33 +647,55 @@ def collect_post_links_with_progress(page, config: WebScrapeConfig) -> list[str]
 
 
 def wait_for_profile_after_login(page, context, profile_url: str) -> None:
-    """Give the user time to complete Instagram login in the opened browser."""
-    JOB.update(active_task="Waiting for Instagram profile")
-    if scraper.PLAYWRIGHT_HEADLESS:
-        timeout_ms = HEADLESS_PROFILE_READY_TIMEOUT
-        JOB.add_log(
-            "INFO",
-            "Waiting for profile",
-            "Headless cloud mode: waiting for a public profile grid. Manual login is not available.",
-        )
-    else:
-        timeout_ms = LOGIN_READY_TIMEOUT
-        JOB.add_log("INFO", "Waiting for profile", "Log in in the opened browser if Instagram asks.")
+    """Wait until the profile grid is ready, supporting auto-login and user-assisted login via live preview."""
+    JOB.update(active_task="Opening Instagram profile")
+    page.goto(profile_url, wait_until="domcontentloaded", timeout=scraper.POST_GOTO_TIMEOUT)
+    emit_preview_frame(page, "Profile opened", force=True)
 
     if JOB.should_cancel():
         raise ScrapeCancelled("Cancelled while waiting for Instagram login/profile.")
 
-    scraper.prepare_profile_page(
-        page,
-        context,
-        profile_url,
-        timeout_ms=timeout_ms,
-        log_hook=JOB.add_log,
+    if scraper.wait_for_selector(page, scraper.PROFILE_GRID_SELECTOR, min(6000, HEADLESS_PROFILE_READY_TIMEOUT)):
+        JOB.add_log("SUCCESS", "Profile detected", "Post grid is visible; scraping can continue.")
+        emit_preview_frame(page, "Profile grid detected", force=True)
+        return
+
+    if scraper.auto_login_if_needed(page, context, profile_url, log_hook=JOB.add_log):
+        JOB.add_log("SUCCESS", "Profile detected", "Auto-login restored the Instagram session.")
+        emit_preview_frame(page, "Auto-login complete", force=True)
+        return
+
+    if scraper.wait_for_selector(page, "input[name='username'], input[name='password']", 1200):
+        wait_for_user_login(page, context, profile_url)
+        return
+
+    JOB.update(active_task="Waiting for Instagram profile")
+    JOB.add_log("INFO", "Waiting for profile", "Waiting for Instagram profile grid to load in live preview.")
+    deadline = time.monotonic() + (HEADLESS_PROFILE_READY_TIMEOUT / 1000)
+    while time.monotonic() < deadline:
+        if JOB.should_cancel():
+            raise ScrapeCancelled("Cancelled while waiting for Instagram login/profile.")
+
+        pump_live_runtime(page, "Waiting for Instagram profile", "Waiting for Instagram profile")
+        if scraper.wait_for_selector(page, scraper.PROFILE_GRID_SELECTOR, 400):
+            JOB.add_log("SUCCESS", "Profile detected", "Post grid is visible; scraping can continue.")
+            emit_preview_frame(page, "Profile grid detected", force=True)
+            return
+        if scraper.wait_for_selector(page, "input[name='username'], input[name='password']", 300):
+            wait_for_user_login(page, context, profile_url)
+            return
+        time.sleep(0.25)
+
+    raise TimeoutError(
+        "Instagram profile grid did not become visible. The profile may require login, "
+        "Instagram may be blocking the current browser session, or the page loaded too slowly."
     )
-    JOB.add_log("SUCCESS", "Profile detected", "Post grid is visible; scraping can continue.")
 
 
 def run_scrape_job(config: WebScrapeConfig) -> None:
+    PREVIEW.reset("Launching live browser preview...")
+    CONTROL_BUS.reset()
+    broadcast_preview_snapshot()
     JOB.update(
         status="running",
         active_task="Opening browser",
@@ -375,6 +717,7 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
 
     browser = None
     context = None
+    page = None
     try:
         with sync_playwright() as p:
             browser, context = scraper.launch_browser(p)
@@ -382,9 +725,12 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
 
             page = context.new_page()
             JOB.add_log("INFO", "Browser opened", "Cloud-safe headless Playwright context started.")
+            emit_preview_frame(page, "Browser started", force=True)
             if scraper.PLAYWRIGHT_STORAGE_STATE:
                 JOB.add_log("INFO", "Storage state loaded", scraper.PLAYWRIGHT_STORAGE_STATE)
             wait_for_profile_after_login(page, context, config.profile_url)
+            JOB.update(status="running", active_task="Collecting post links")
+            emit_preview_frame(page, "Profile ready for scrolling", force=True)
 
             link_collection_started = time.perf_counter()
             links = collect_post_links_with_progress(page, config)
@@ -395,6 +741,7 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                 "Link collection complete",
                 f"Found {len(links)} unique post links in {link_collection_elapsed:.2f}s.",
             )
+            emit_preview_frame(page, f"Link collection complete: {len(links)} links", force=True)
 
             all_posts = []
             total_links = len(links)
@@ -406,6 +753,7 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                 if JOB.should_cancel():
                     raise ScrapeCancelled("Cancelled during post extraction.")
 
+                pump_live_runtime(page, "Extracting post data", f"Preparing post {index}/{total_links}")
                 JOB.update(
                     active_task="Extracting post data",
                     current_post=link,
@@ -421,6 +769,7 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                     raw_date, date_obj, post_type = scraper.open_post_for_extraction(page, link)
                     detected_date_text = date_obj.strftime(scraper.DATE_INPUT_FORMAT) if date_obj else (raw_date or "Cannot detect")
                     JOB.add_log("INFO", "Post date detected", f"{link} -> {detected_date_text}")
+                    emit_preview_frame(page, f"Post date detected: {detected_date_text}", force=True)
 
                     if date_obj is not None:
                         if oldest_post_seen is None or date_obj < oldest_post_seen:
@@ -440,6 +789,7 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                         snapshot = JOB.snapshot()
                         JOB.update(posts_skipped_newer=snapshot["postsSkippedNewer"] + 1)
                         JOB.add_log("INFO", "Post skipped", coverage_reason)
+                        emit_preview_frame(page, f"Skipped newer post {index}/{total_links}", force=True)
                         needs_cooldown = True
                         JOB.update(posts_checked=index, posts_processed=index, progress=20 + round(70 * index / max(total_links, 1)))
                         time.sleep(scraper.BASE_POST_DELAY)
@@ -449,6 +799,7 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                         snapshot = JOB.snapshot()
                         JOB.update(posts_skipped_older=snapshot["postsSkippedOlder"] + 1)
                         JOB.add_log("INFO", "Post skipped", coverage_reason)
+                        emit_preview_frame(page, f"Reached posts older than start date at {index}/{total_links}", force=True)
                         if seen_in_range_post:
                             JOB.add_log(
                                 "INFO",
@@ -466,6 +817,7 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                         snapshot = JOB.snapshot()
                         JOB.update(posts_skipped_unknown=snapshot["postsSkippedUnknown"] + 1)
                         JOB.add_log("WARN", "Post skipped", coverage_reason)
+                        emit_preview_frame(page, f"Skipped undated post {index}/{total_links}", force=True)
                         needs_cooldown = True
                         JOB.update(posts_checked=index, posts_processed=index, progress=20 + round(70 * index / max(total_links, 1)))
                         time.sleep(scraper.BASE_POST_DELAY)
@@ -503,11 +855,13 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                             "Extracted post",
                             f"Likes: {post.likes}, Comments: {post.comments}, Shares: {post.shares}, Date: {scraper.format_post_date(post)}, Took: {post_elapsed:.2f}s",
                         )
+                        emit_preview_frame(page, f"Extracted post {index}/{total_links}", force=True)
                     else:
                         snapshot = JOB.snapshot()
                         JOB.update(failed_extractions=snapshot["failedExtractions"] + 1)
                         JOB.update(errors=snapshot["errors"] + 1)
                         JOB.add_log("WARN", "Metrics incomplete", link)
+                        emit_preview_frame(page, f"Metrics incomplete for {index}/{total_links}", force=True)
                         needs_cooldown = True
                     if post_elapsed >= scraper.SLOW_POST_SECONDS:
                         JOB.add_log("WARN", "Slow extraction", f"{link} took {post_elapsed:.2f}s.")
@@ -516,6 +870,7 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                     JOB.update(failed_extractions=snapshot["failedExtractions"] + 1)
                     JOB.update(errors=snapshot["errors"] + 1)
                     JOB.add_log("WARN", "Post extraction failed", f"{link} ({type(exc).__name__})")
+                    emit_preview_frame(page, f"Extraction failed for {index}/{total_links}", force=True)
                     needs_cooldown = True
 
                 JOB.update(posts_checked=index, posts_processed=index, progress=20 + round(70 * index / max(total_links, 1)))
@@ -569,14 +924,19 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                 )
                 JOB.add_log("WARN", "No posts matched range", empty_reason)
             JOB.add_log("SUCCESS", "Excel saved", config.output_file)
+            emit_preview_frame(page, "Excel saved", force=True)
             JOB.update(status="completed", active_task="Completed", progress=100, finished_at=time.time())
     except ScrapeCancelled as exc:
         JOB.update(status="stopped", active_task="Stopped", finished_at=time.time())
         JOB.add_log("WARN", "Scrape cancelled", str(exc))
+        if page is not None:
+            emit_preview_frame(page, "Scrape cancelled", force=True)
     except Exception as exc:
         snapshot = JOB.snapshot()
         JOB.update(status="failed", active_task="Failed", errors=snapshot["errors"] + 1, finished_at=time.time())
         JOB.add_log("WARN", "Scrape failed", f"{type(exc).__name__}: {exc}")
+        if page is not None:
+            emit_preview_frame(page, "Scrape failed", force=True)
     finally:
         if context is not None:
             try:
@@ -588,6 +948,7 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                 browser.close()
             except Exception:
                 pass
+        broadcast_job_snapshot(include_logs=False)
 
 
 @app.route("/")
@@ -602,6 +963,59 @@ def asset_file(filename: str):
         return jsonify({"ok": False, "errors": ["Asset not allowed."]}), 404
 
     return send_file(Path(__file__).with_name(filename))
+
+
+@sock.route("/ws/dashboard")
+def dashboard_socket(ws):
+    client = DASHBOARD_HUB.register(ws)
+    try:
+        client.send({"type": "snapshot", "data": JOB.snapshot(include_logs=True)})
+        client.send({"type": "preview", "data": PREVIEW.snapshot() or {}})
+
+        while True:
+            raw_message = ws.receive()
+            if raw_message is None:
+                break
+
+            try:
+                message = json.loads(raw_message)
+            except Exception:
+                continue
+
+            message_type = str(message.get("type", "")).strip()
+            if message_type == "request_snapshot":
+                client.send({"type": "snapshot", "data": JOB.snapshot(include_logs=True)})
+                client.send({"type": "preview", "data": PREVIEW.snapshot() or {}})
+                continue
+
+            if message_type != "control":
+                continue
+
+            action = str(message.get("action", "")).strip()
+            if not action:
+                continue
+
+            if action == "pause":
+                CONTROL_BUS.push({"action": "pause"})
+                JOB.update(status="paused", active_task="Pause requested")
+                JOB.add_log("WARN", "Pause requested", "Automation will pause at the next safe checkpoint.")
+                continue
+
+            if action == "resume":
+                CONTROL_BUS.push({"action": "resume"})
+                JOB.update(status="running", active_task="Resuming automation")
+                JOB.add_log("INFO", "Resume requested", "Automation will resume at the next safe checkpoint.")
+                continue
+
+            CONTROL_BUS.push(message)
+            if action == "force_next_scroll":
+                JOB.add_log("INFO", "Control received", "Forced scroll requested from the live preview.")
+            elif action == "capture_screenshot":
+                JOB.add_log("INFO", "Control received", "Manual screenshot requested from the live preview.")
+    except Exception:
+        pass
+    finally:
+        DASHBOARD_HUB.unregister(client)
 
 
 @app.post("/api/validate")
@@ -625,6 +1039,10 @@ def start_scrape():
         return jsonify({"ok": False, "errors": ["A scraping job is already running."]}), 409
 
     JOB.reset()
+    PREVIEW.reset("Starting live browser preview...")
+    CONTROL_BUS.reset()
+    broadcast_job_snapshot(include_logs=True)
+    broadcast_preview_snapshot()
     JOB_THREAD = threading.Thread(target=run_scrape_job, args=(config,), daemon=True)
     JOB_THREAD.start()
 
@@ -640,6 +1058,7 @@ def status():
 def clear_logs():
     with JOB.lock:
         JOB.logs = []
+    broadcast_job_snapshot(include_logs=True)
     return jsonify({"ok": True, "status": JOB.snapshot()})
 
 

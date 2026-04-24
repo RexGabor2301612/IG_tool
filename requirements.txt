@@ -1,5 +1,7 @@
 Flask
 gunicorn
+flask-sock
+simple-websocket
 playwright
 openpyxl
 pandas  

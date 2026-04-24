@@ -75,6 +75,52 @@
         </section>
 
         <section class="center-stack">
+            <section class="preview-panel">
+                <div class="preview-header">
+                    <div>
+                        <p class="status-label">Live browser preview</p>
+                        <h3>Instagram Browser Feed</h3>
+                    </div>
+                    <span class="preview-status" id="previewStatusText" data-state="connecting">Connecting...</span>
+                </div>
+
+                <div class="preview-stage" id="previewStage" tabindex="0" aria-label="Live browser preview and interactive login area">
+                    <img class="live-preview-image hidden" id="livePreviewFrame" alt="Live browser preview">
+                    <div class="preview-placeholder" id="previewPlaceholder">Waiting for live browser preview...</div>
+                </div>
+
+                <div class="preview-meta">
+                    <div class="preview-meta-card">
+                        <span class="preview-meta-label">Preview Note</span>
+                        <strong id="previewNoteText">Waiting for live browser preview.</strong>
+                    </div>
+                    <div class="preview-meta-card">
+                        <span class="preview-meta-label">Browser URL</span>
+                        <strong id="previewUrlText">-</strong>
+                    </div>
+                    <div class="preview-meta-card">
+                        <span class="preview-meta-label">Scroll Round</span>
+                        <strong id="previewRoundLive">0 / 0</strong>
+                    </div>
+                    <div class="preview-meta-card">
+                        <span class="preview-meta-label">Loaded Links</span>
+                        <strong id="previewPostsText">0</strong>
+                    </div>
+                </div>
+
+                <p class="preview-tip">
+                    Click inside the preview to focus it. Mouse clicks and keyboard input are forwarded to the live Playwright browser when a job is running.
+                </p>
+
+                <div class="preview-control-row">
+                    <button class="preview-control-btn primary" type="button" id="pauseResumeBtn">Pause</button>
+                    <button class="preview-control-btn" type="button" id="scrollUpBtn">Scroll Up</button>
+                    <button class="preview-control-btn" type="button" id="scrollDownBtn">Scroll Down</button>
+                    <button class="preview-control-btn" type="button" id="forceScrollBtn">Force Scroll</button>
+                    <button class="preview-control-btn" type="button" id="capturePreviewBtn">Capture</button>
+                </div>
+            </section>
+
             <section class="status-panel compact-status">
                 <div class="status-header">
                     <div>

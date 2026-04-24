@@ -97,6 +97,7 @@ LOGIN_FORM_TIMEOUT = 12000
 LOGIN_POST_SUBMIT_TIMEOUT = 15000
 LogHook = Callable[[str, str, str], None]
 ProgressHook = Callable[[int, int, int], None]
+LiveHook = Callable[[Any, str, dict[str, Any]], None]
 
 
 def getenv_int(name: str, default: int) -> int:
@@ -1663,6 +1664,7 @@ def collect_post_links(
     probe_page=None,
     log_hook: Optional[LogHook] = None,
     progress_hook: Optional[ProgressHook] = None,
+    live_hook: Optional[LiveHook] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
     diagnostics: Optional[dict[str, Any]] = None,
 ) -> List[str]:
@@ -1730,9 +1732,24 @@ def collect_post_links(
             if oldest_date is not None:
                 oldest_visible_date_seen = oldest_date
                 if newest_visible_date_seen is None:
-                    newest_visible_date_seen = oldest_date
+                        newest_visible_date_seen = oldest_date
                 last_probed_oldest_link = initial_oldest_link
                 emit_log(log_hook, "INFO", "Oldest post so far", oldest_date.strftime(DATE_INPUT_FORMAT))
+    if live_hook is not None:
+        try:
+            live_hook(
+                page,
+                "initial-grid",
+                {
+                    "round": 0,
+                    "newLinks": len(links),
+                    "totalLinks": len(links),
+                    "oldestVisibleDate": oldest_visible_date_seen.strftime(DATE_INPUT_FORMAT) if oldest_visible_date_seen else "",
+                    "newestVisibleDate": newest_visible_date_seen.strftime(DATE_INPUT_FORMAT) if newest_visible_date_seen else "",
+                },
+            )
+        except Exception:
+            pass
     emit_progress(progress_hook, 0, scroll_rounds, len(links))
 
     for scroll_round in range(1, scroll_rounds + 1):
@@ -1740,8 +1757,9 @@ def collect_post_links(
             raise RuntimeError("Cancelled during profile scrolling.")
 
         round_started = time.perf_counter()
-        previous_state = get_profile_scroll_state(page)
-        current_state = previous_state
+        round_start_state = get_profile_scroll_state(page)
+        previous_state = round_start_state
+        current_state = round_start_state
         before = len(links)
         dom_changed = False
         scrolled = False
@@ -1798,10 +1816,11 @@ def collect_post_links(
         new_count = len(links) - before
         scroll_details = (
             f"strategy={strategy_used}, attempts={attempts_used}, root={current_state['scrollRoot']}({current_state['scrollRootSource']}), "
-            f"root_height={previous_state['scrollHeight']}->{current_state['scrollHeight']}, "
-            f"body_height={previous_state['bodyHeight']}->{current_state['bodyHeight']}, "
-            f"top={previous_state['scrollTop']}->{current_state['scrollTop']}, "
-            f"anchors={before}->{len(links)}"
+            f"root_height={round_start_state['scrollHeight']}->{current_state['scrollHeight']}, "
+            f"body_height={round_start_state['bodyHeight']}->{current_state['bodyHeight']}, "
+            f"top={round_start_state['scrollTop']}->{current_state['scrollTop']}, "
+            f"visible_anchors={round_start_state['linkCount']}->{current_state['linkCount']}, "
+            f"total_links={before}->{len(links)}"
         )
 
         if new_count > 0:
@@ -1885,6 +1904,24 @@ def collect_post_links(
                 )
 
         emit_progress(progress_hook, scroll_round, scroll_rounds, len(links))
+        if live_hook is not None:
+            try:
+                live_hook(
+                    page,
+                    "scroll-round",
+                    {
+                        "round": scroll_round,
+                        "newLinks": new_count,
+                        "totalLinks": len(links),
+                        "stagnant": stagnant,
+                        "oldestVisibleDate": oldest_visible_date_seen.strftime(DATE_INPUT_FORMAT) if oldest_visible_date_seen else "",
+                        "newestVisibleDate": newest_visible_date_seen.strftime(DATE_INPUT_FORMAT) if newest_visible_date_seen else "",
+                        "strategy": strategy_used,
+                        "reason": reason if new_count == 0 else "",
+                    },
+                )
+            except Exception:
+                pass
 
         if coverage_reached:
             stop_reason = (
@@ -1954,6 +1991,23 @@ def collect_post_links(
             "Link collection stopped",
             f"Reached max scroll rounds ({scroll_rounds}) with {len(links)} unique links collected.",
         )
+
+    if live_hook is not None:
+        try:
+            live_hook(
+                page,
+                "scroll-stop",
+                {
+                    "round": min(scroll_rounds, scroll_round if scroll_rounds > 0 else 0),
+                    "totalLinks": len(links),
+                    "reason": stop_reason,
+                    "coverageReached": coverage_reached,
+                    "oldestVisibleDate": oldest_visible_date_seen.strftime(DATE_INPUT_FORMAT) if oldest_visible_date_seen else "",
+                    "newestVisibleDate": newest_visible_date_seen.strftime(DATE_INPUT_FORMAT) if newest_visible_date_seen else "",
+                },
+            )
+        except Exception:
+            pass
 
     if diagnostics is not None:
         diagnostics.clear()

@@ -29,11 +29,34 @@ document.addEventListener("DOMContentLoaded", function () {
     const aboutModal = document.getElementById("aboutModal");
     const closeAboutModalBtn = document.getElementById("closeAboutModalBtn");
     const selectedLogDetails = document.getElementById("selectedLogDetails");
+    const previewStatusText = document.getElementById("previewStatusText");
+    const previewStage = document.getElementById("previewStage");
+    const livePreviewFrame = document.getElementById("livePreviewFrame");
+    const previewPlaceholder = document.getElementById("previewPlaceholder");
+    const previewNoteText = document.getElementById("previewNoteText");
+    const previewUrlText = document.getElementById("previewUrlText");
+    const previewRoundLive = document.getElementById("previewRoundLive");
+    const previewPostsText = document.getElementById("previewPostsText");
+    const pauseResumeBtn = document.getElementById("pauseResumeBtn");
+    const scrollUpBtn = document.getElementById("scrollUpBtn");
+    const scrollDownBtn = document.getElementById("scrollDownBtn");
+    const forceScrollBtn = document.getElementById("forceScrollBtn");
+    const capturePreviewBtn = document.getElementById("capturePreviewBtn");
 
     let confirmedPayload = null;
     let lastValidatedConfig = null;
-    let pollTimer = null;
     let latestLogs = [];
+    let latestStatus = { status: "idle" };
+    let currentPreview = {
+        image: "",
+        width: 0,
+        height: 0,
+        note: "Waiting for live browser preview.",
+        url: "",
+    };
+    let dashboardSocket = null;
+    let reconnectTimer = null;
+    let socketShouldReconnect = true;
 
     function escapeHtml(value) {
         return String(value ?? "")
@@ -109,7 +132,7 @@ document.addEventListener("DOMContentLoaded", function () {
                     const message = response.ok
                         ? "The server returned a non-JSON response."
                         : transient
-                            ? "Render is waking up, restarting, or busy. Please wait a moment and try again."
+                            ? "The server returned a temporary gateway error. The app may still be starting, restarting, or timed out."
                             : `The server returned ${response.status}. Please refresh and try again.`;
                     data = {
                         ok: false,
@@ -175,12 +198,18 @@ document.addEventListener("DOMContentLoaded", function () {
         }).join("");
     }
 
+    function renderLogs(logs) {
+        latestLogs = Array.isArray(logs) ? logs.slice(0, 250) : [];
+        renderLogRows(document.getElementById("logsBody"), latestLogs);
+        renderLogRows(document.getElementById("modalLogsBody"), latestLogs);
+    }
+
     function showSelectedLog(index) {
         const log = latestLogs[Number(index)];
         if (!log || !selectedLogDetails) return;
 
         selectedLogDetails.innerHTML = `
-            <strong>${escapeHtml(log.level)} • ${escapeHtml(log.time)}</strong>
+            <strong>${escapeHtml(log.level)} - ${escapeHtml(log.time)}</strong>
             <span>${escapeHtml(log.action)}</span>
             <p>${escapeHtml(log.details || "No extra details.")}</p>
         `;
@@ -189,57 +218,192 @@ document.addEventListener("DOMContentLoaded", function () {
         document.querySelectorAll(`.log-item[data-log-index="${index}"]`).forEach((row) => row.classList.add("selected"));
     }
 
-    function renderLogs(logs) {
-        latestLogs = logs || [];
-        renderLogRows(document.getElementById("logsBody"), latestLogs);
-        renderLogRows(document.getElementById("modalLogsBody"), latestLogs);
+    function sameLog(a, b) {
+        if (!a || !b) return false;
+        return a.time === b.time && a.level === b.level && a.action === b.action && a.details === b.details;
+    }
+
+    function appendLiveLog(log) {
+        if (!log) return;
+        if (!sameLog(log, latestLogs[0])) {
+            latestLogs.unshift(log);
+            latestLogs = latestLogs.slice(0, 250);
+            renderLogRows(document.getElementById("logsBody"), latestLogs);
+            renderLogRows(document.getElementById("modalLogsBody"), latestLogs);
+        }
+    }
+
+    function setSocketState(state, label) {
+        previewStatusText.dataset.state = state;
+        previewStatusText.textContent = label;
+    }
+
+    function updatePreviewFrame(preview) {
+        currentPreview = {
+            image: preview.image || "",
+            width: Number(preview.width) || 0,
+            height: Number(preview.height) || 0,
+            note: preview.note || "Waiting for live browser preview.",
+            url: preview.url || "",
+            updatedAt: preview.updatedAt || "",
+        };
+
+        previewNoteText.textContent = currentPreview.note;
+        previewUrlText.textContent = currentPreview.url || "-";
+
+        if (currentPreview.image) {
+            livePreviewFrame.src = `data:image/jpeg;base64,${currentPreview.image}`;
+            livePreviewFrame.classList.remove("hidden");
+            previewPlaceholder.classList.add("hidden");
+            previewStage.classList.add("has-image");
+        } else {
+            livePreviewFrame.removeAttribute("src");
+            livePreviewFrame.classList.add("hidden");
+            previewPlaceholder.textContent = currentPreview.note || "Waiting for live browser preview.";
+            previewPlaceholder.classList.remove("hidden");
+            previewStage.classList.remove("has-image");
+        }
     }
 
     function setButtonStates(data) {
         const status = data.status || "idle";
-        const running = status === "running" || status === "stopping";
+        const running = ["running", "stopping", "paused", "waiting_login"].includes(status);
+        const interactive = ["running", "paused", "waiting_login"].includes(status);
 
         confirmStartBtn.disabled = running;
         runStartBtn.disabled = running;
         cancelBtn.disabled = !running;
         downloadBtn.disabled = !data.canDownload;
         searchForm.querySelector("button[type='submit']").disabled = running;
+
+        pauseResumeBtn.disabled = !interactive;
+        pauseResumeBtn.textContent = status === "paused" ? "Resume" : "Pause";
+        scrollUpBtn.disabled = !interactive;
+        scrollDownBtn.disabled = !interactive;
+        forceScrollBtn.disabled = !interactive;
+        capturePreviewBtn.disabled = !interactive;
     }
 
     function renderStatus(data) {
-        const status = data.status || "idle";
-        const config = data.config || {};
+        latestStatus = data || { status: "idle" };
+        const status = latestStatus.status || "idle";
+        const config = latestStatus.config || {};
+        const currentRound = latestStatus.currentScrollRound ?? 0;
+        const totalRounds = latestStatus.totalScrollRounds ?? 0;
+        const postsFound = latestStatus.postsFound ?? 0;
 
-        document.getElementById("statPostsFound").textContent = data.postsFound ?? 0;
-        document.getElementById("statProgress").textContent = `${data.progress ?? 0}%`;
-        document.getElementById("statSuccessRate").textContent = `${data.successRate ?? 0}%`;
-        document.getElementById("statErrors").textContent = data.errors ?? 0;
+        document.getElementById("statPostsFound").textContent = postsFound;
+        document.getElementById("statProgress").textContent = `${latestStatus.progress ?? 0}%`;
+        document.getElementById("statSuccessRate").textContent = `${latestStatus.successRate ?? 0}%`;
+        document.getElementById("statErrors").textContent = latestStatus.errors ?? 0;
 
-        document.getElementById("statusTitle").textContent = data.activeTask || "Waiting for input";
+        document.getElementById("statusTitle").textContent = latestStatus.activeTask || "Waiting for input";
         document.getElementById("statusBadge").textContent = status;
         document.getElementById("statusBadge").dataset.status = status;
-        document.getElementById("scrollRoundText").textContent = `Round ${data.currentScrollRound ?? 0} / ${data.totalScrollRounds ?? 0}`;
-        document.getElementById("currentPostText").textContent = data.currentPost || "None";
+        document.getElementById("scrollRoundText").textContent = `Round ${currentRound} / ${totalRounds}`;
+        document.getElementById("currentPostText").textContent = latestStatus.currentPost || "None";
 
-        setProgress("progressFill", "progressText", data.progress ?? 0);
-        setProgress("successFill", "successText", data.successRate ?? 0);
-        setProgress("healthFill", "healthText", data.health ?? 100);
+        previewRoundLive.textContent = `${currentRound} / ${totalRounds}`;
+        previewPostsText.textContent = String(postsFound);
 
-        document.getElementById("outputFileText").textContent = data.outputFile || (lastValidatedConfig?.outputFile || "Not selected");
+        setProgress("progressFill", "progressText", latestStatus.progress ?? 0);
+        setProgress("successFill", "successText", latestStatus.successRate ?? 0);
+        setProgress("healthFill", "healthText", latestStatus.health ?? 100);
+
+        document.getElementById("outputFileText").textContent = latestStatus.outputFile || (lastValidatedConfig?.outputFile || "Not selected");
         document.getElementById("tagStartDate").textContent = `Date: ${config.dateCoverage || lastValidatedConfig?.dateCoverage || "-"}`;
         document.getElementById("tagMaxScroll").textContent = `Max Scroll: ${config.scrollRounds || lastValidatedConfig?.scrollRounds || "-"}`;
-        document.getElementById("tagRound").textContent = `Round: ${data.currentScrollRound ?? 0}`;
+        document.getElementById("tagRound").textContent = `Round: ${currentRound}`;
 
-        renderLogs(data.logs || []);
-        setButtonStates(data);
+        if (Array.isArray(latestStatus.logs)) {
+            renderLogs(latestStatus.logs);
+        }
 
-        if (!["running", "stopping"].includes(status) && pollTimer) {
-            clearInterval(pollTimer);
-            pollTimer = null;
+        setButtonStates(latestStatus);
+    }
+
+    function socketUrl() {
+        const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+        return `${protocol}://${window.location.host}/ws/dashboard`;
+    }
+
+    function isSocketOpen() {
+        return dashboardSocket && dashboardSocket.readyState === WebSocket.OPEN;
+    }
+
+    function sendSocket(payload) {
+        if (!isSocketOpen()) return false;
+        dashboardSocket.send(JSON.stringify(payload));
+        return true;
+    }
+
+    function scheduleReconnect() {
+        if (!socketShouldReconnect || reconnectTimer) return;
+        reconnectTimer = window.setTimeout(function () {
+            reconnectTimer = null;
+            connectSocket(true);
+        }, 1500);
+    }
+
+    function handleSocketMessage(message) {
+        if (!message || typeof message !== "object") return;
+        if (message.type === "snapshot") {
+            renderStatus(message.data || {});
+            return;
+        }
+        if (message.type === "log") {
+            appendLiveLog(message.data);
+            return;
+        }
+        if (message.type === "preview") {
+            updatePreviewFrame(message.data || {});
         }
     }
 
+    function connectSocket(force = false) {
+        if (!force && dashboardSocket && (dashboardSocket.readyState === WebSocket.OPEN || dashboardSocket.readyState === WebSocket.CONNECTING)) {
+            return;
+        }
+
+        if (force && dashboardSocket) {
+            try {
+                dashboardSocket.close();
+            } catch (error) {
+                // no-op
+            }
+        }
+
+        setSocketState("connecting", "Connecting...");
+        dashboardSocket = new WebSocket(socketUrl());
+
+        dashboardSocket.addEventListener("open", function () {
+            setSocketState("connected", "Live");
+            sendSocket({ type: "request_snapshot" });
+        });
+
+        dashboardSocket.addEventListener("message", function (event) {
+            try {
+                handleSocketMessage(JSON.parse(event.data));
+            } catch (error) {
+                console.warn("Failed to parse dashboard socket message.", error);
+            }
+        });
+
+        dashboardSocket.addEventListener("close", function () {
+            setSocketState("disconnected", "Disconnected");
+            if (socketShouldReconnect) scheduleReconnect();
+        });
+
+        dashboardSocket.addEventListener("error", function () {
+            setSocketState("disconnected", "Disconnected");
+        });
+    }
+
     async function refreshStatus() {
+        if (sendSocket({ type: "request_snapshot" })) {
+            return;
+        }
+
         try {
             const data = await fetchJson("/api/status", { retries: 2 });
             renderStatus(data);
@@ -297,17 +461,16 @@ document.addEventListener("DOMContentLoaded", function () {
             if (!confirmedPayload) return;
         }
 
+        connectSocket();
         try {
             const data = await fetchJson("/api/start", {
                 method: "POST",
                 body: JSON.stringify(confirmedPayload),
             });
             setModalVisible(confirmationModal, false);
-            showMessage("Scraping started. Log in in the opened browser if Instagram asks.", "success");
+            showMessage("Scraping started. Use the live preview to watch progress or complete login if Instagram asks.", "success");
             renderStatus(data.status);
-
-            if (pollTimer) clearInterval(pollTimer);
-            pollTimer = setInterval(refreshStatus, 1500);
+            sendSocket({ type: "request_snapshot" });
         } catch (error) {
             showMessage(error.message);
         }
@@ -318,11 +481,46 @@ document.addEventListener("DOMContentLoaded", function () {
             const data = await fetchJson("/api/cancel", { method: "POST" });
             showMessage("Cancellation requested. The scraper will stop at the next safe checkpoint.", "warn");
             renderStatus(data.status);
-            if (!pollTimer) pollTimer = setInterval(refreshStatus, 1500);
         } catch (error) {
             showMessage(error.message, "warn");
             if (error.payload?.status) renderStatus(error.payload.status);
         }
+    }
+
+    function sendControl(action, extra = {}) {
+        if (!sendSocket({ type: "control", action, ...extra })) {
+            showMessage("Live controls are unavailable until the dashboard reconnects.", "warn");
+        }
+    }
+
+    function handlePreviewClick(event) {
+        if (!currentPreview.image) return;
+
+        const rect = previewStage.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+
+        const relativeX = event.clientX - rect.left;
+        const relativeY = event.clientY - rect.top;
+        const sourceWidth = currentPreview.width || livePreviewFrame.naturalWidth || rect.width;
+        const sourceHeight = currentPreview.height || livePreviewFrame.naturalHeight || rect.height;
+        const x = Math.max(0, Math.round(relativeX * sourceWidth / rect.width));
+        const y = Math.max(0, Math.round(relativeY * sourceHeight / rect.height));
+
+        previewStage.focus();
+        sendControl("preview_click", { x, y });
+    }
+
+    function handlePreviewKey(event) {
+        if (!["running", "paused", "waiting_login"].includes(latestStatus.status || "")) return;
+
+        const printable = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
+        const payload = {
+            key: event.key,
+            text: printable ? event.key : "",
+        };
+
+        event.preventDefault();
+        sendControl("preview_key", payload);
     }
 
     searchForm.addEventListener("submit", function (event) {
@@ -387,9 +585,11 @@ document.addEventListener("DOMContentLoaded", function () {
             openLogsDrawer();
         }
     });
+
     confirmationModal.addEventListener("click", function (event) {
         if (event.target === confirmationModal) setModalVisible(confirmationModal, false);
     });
+
     aboutUsBtn.addEventListener("click", function () {
         setModalVisible(aboutModal, true);
     });
@@ -424,5 +624,45 @@ document.addEventListener("DOMContentLoaded", function () {
 
     cancelBtn.addEventListener("click", cancelScrape);
 
+    pauseResumeBtn.addEventListener("click", function () {
+        if ((latestStatus.status || "") === "paused") {
+            sendControl("resume");
+        } else {
+            sendControl("pause");
+        }
+    });
+    scrollUpBtn.addEventListener("click", function () {
+        sendControl("scroll_up");
+    });
+    scrollDownBtn.addEventListener("click", function () {
+        sendControl("scroll_down");
+    });
+    forceScrollBtn.addEventListener("click", function () {
+        sendControl("force_next_scroll");
+    });
+    capturePreviewBtn.addEventListener("click", function () {
+        sendControl("capture_screenshot");
+    });
+
+    previewStage.addEventListener("click", handlePreviewClick);
+    previewStage.addEventListener("keydown", handlePreviewKey);
+
+    window.addEventListener("beforeunload", function () {
+        socketShouldReconnect = false;
+        if (reconnectTimer) {
+            window.clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+        }
+        if (dashboardSocket) {
+            try {
+                dashboardSocket.close();
+            } catch (error) {
+                // no-op
+            }
+        }
+    });
+
+    updatePreviewFrame(currentPreview);
+    connectSocket();
     refreshStatus();
 });
