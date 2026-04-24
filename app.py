@@ -45,8 +45,14 @@ class ScrapeJobState:
         self.current_scroll_round = 0
         self.total_scroll_rounds = 0
         self.posts_found = 0
+        self.posts_checked = 0
         self.posts_processed = 0
+        self.posts_in_range = 0
         self.posts_success = 0
+        self.posts_skipped_newer = 0
+        self.posts_skipped_older = 0
+        self.posts_skipped_unknown = 0
+        self.failed_extractions = 0
         self.errors = 0
         self.progress = 0
         self.output_file = ""
@@ -90,7 +96,13 @@ class ScrapeJobState:
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
-            success_rate = round(100 * self.posts_success / self.posts_processed) if self.posts_processed else 0
+            eligible_total = self.posts_in_range if self.posts_in_range > 0 else (self.posts_success + self.failed_extractions)
+            if eligible_total > 0:
+                success_rate = round(100 * self.posts_success / eligible_total)
+            elif self.posts_checked > 0 and self.failed_extractions == 0:
+                success_rate = 100
+            else:
+                success_rate = 0
             health = max(0, 100 - min(self.errors * 8, 70))
 
             return {
@@ -100,8 +112,14 @@ class ScrapeJobState:
                 "currentScrollRound": self.current_scroll_round,
                 "totalScrollRounds": self.total_scroll_rounds,
                 "postsFound": self.posts_found,
+                "postsChecked": self.posts_checked,
                 "postsProcessed": self.posts_processed,
+                "postsInRange": self.posts_in_range,
                 "postsSuccess": self.posts_success,
+                "postsSkippedNewer": self.posts_skipped_newer,
+                "postsSkippedOlder": self.posts_skipped_older,
+                "postsSkippedUnknown": self.posts_skipped_unknown,
+                "failedExtractions": self.failed_extractions,
                 "errors": self.errors,
                 "progress": self.progress,
                 "successRate": success_rate,
@@ -256,6 +274,7 @@ def config_to_summary(config: WebScrapeConfig) -> dict[str, str]:
 def collect_post_links_with_progress(page, config: WebScrapeConfig) -> list[str]:
     JOB.update(active_task="Collecting post links", total_scroll_rounds=config.scroll_rounds)
     JOB.add_log("INFO", "Profile ready", "Starting profile grid scan.")
+
     def progress_hook(scroll_round: int, total_rounds: int, posts_found: int) -> None:
         progress_value = 0 if scroll_round <= 0 else min(20, round(20 * scroll_round / max(total_rounds, 1)))
         JOB.update(
@@ -265,20 +284,46 @@ def collect_post_links_with_progress(page, config: WebScrapeConfig) -> list[str]
             progress=progress_value,
         )
 
+    diagnostics: dict[str, Any] = {}
+    probe_page = page.context.new_page()
+    probe_page.route("**/*", scraper.route_nonessential_resources)
+
     try:
-        return scraper.collect_post_links(
+        links = scraper.collect_post_links(
             page,
             max_posts=None,
             scroll_rounds=config.scroll_rounds,
             target_start_date=config.start_date,
+            probe_page=probe_page,
             log_hook=JOB.add_log,
             progress_hook=progress_hook,
             cancel_check=JOB.should_cancel,
+            diagnostics=diagnostics,
         )
+        oldest = diagnostics.get("oldestVisibleDate")
+        newest = diagnostics.get("newestVisibleDate")
+        if newest is not None or oldest is not None:
+            JOB.add_log(
+                "INFO",
+                "Visible date span after scrolling",
+                (
+                    f"Newest visible: {newest.strftime(scraper.DATE_INPUT_FORMAT) if newest else 'unknown'} | "
+                    f"Oldest visible: {oldest.strftime(scraper.DATE_INPUT_FORMAT) if oldest else 'unknown'}"
+                ),
+            )
+        stop_reason = diagnostics.get("stopReason")
+        if stop_reason:
+            JOB.add_log("INFO", "Scroll stop reason", str(stop_reason))
+        return links
     except RuntimeError as exc:
         if "Cancelled during profile scrolling." in str(exc):
             raise ScrapeCancelled(str(exc)) from exc
         raise
+    finally:
+        try:
+            probe_page.close()
+        except Exception:
+            pass
 
 
 def wait_for_profile_after_login(page, context, profile_url: str) -> None:
@@ -364,6 +409,7 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                 JOB.update(
                     active_task="Extracting post data",
                     current_post=link,
+                    posts_checked=index - 1,
                     posts_processed=index - 1,
                     progress=20 + round(70 * (index - 1) / max(total_links, 1)),
                 )
@@ -376,6 +422,14 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                     detected_date_text = date_obj.strftime(scraper.DATE_INPUT_FORMAT) if date_obj else (raw_date or "Cannot detect")
                     JOB.add_log("INFO", "Post date detected", f"{link} -> {detected_date_text}")
 
+                    if date_obj is not None:
+                        if oldest_post_seen is None or date_obj < oldest_post_seen:
+                            oldest_post_seen = date_obj
+                            JOB.add_log("INFO", "Oldest post so far", date_obj.strftime(scraper.DATE_INPUT_FORMAT))
+                        if newest_post_seen is None or date_obj > newest_post_seen:
+                            newest_post_seen = date_obj
+                            JOB.add_log("INFO", "Newest post so far", date_obj.strftime(scraper.DATE_INPUT_FORMAT))
+
                     coverage_status, coverage_reason = scraper.classify_post_date_coverage(
                         date_obj,
                         config.start_date,
@@ -383,13 +437,17 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                     )
 
                     if coverage_status == "newer_than_end":
+                        snapshot = JOB.snapshot()
+                        JOB.update(posts_skipped_newer=snapshot["postsSkippedNewer"] + 1)
                         JOB.add_log("INFO", "Post skipped", coverage_reason)
                         needs_cooldown = True
-                        JOB.update(posts_processed=index, progress=20 + round(70 * index / max(total_links, 1)))
+                        JOB.update(posts_checked=index, posts_processed=index, progress=20 + round(70 * index / max(total_links, 1)))
                         time.sleep(scraper.BASE_POST_DELAY)
                         continue
 
                     if coverage_status == "older_than_start":
+                        snapshot = JOB.snapshot()
+                        JOB.update(posts_skipped_older=snapshot["postsSkippedOlder"] + 1)
                         JOB.add_log("INFO", "Post skipped", coverage_reason)
                         if seen_in_range_post:
                             JOB.add_log(
@@ -397,21 +455,25 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                                 "Reached posts older than start date",
                                 "Stopping post processing because collected links are ordered newest to oldest.",
                             )
-                            JOB.update(posts_processed=index, progress=90)
+                            JOB.update(posts_checked=index, posts_processed=index, progress=90)
                             break
                         needs_cooldown = True
-                        JOB.update(posts_processed=index, progress=20 + round(70 * index / max(total_links, 1)))
+                        JOB.update(posts_checked=index, posts_processed=index, progress=20 + round(70 * index / max(total_links, 1)))
                         time.sleep(scraper.BASE_POST_DELAY)
                         continue
 
                     if coverage_status == "unknown_date":
+                        snapshot = JOB.snapshot()
+                        JOB.update(posts_skipped_unknown=snapshot["postsSkippedUnknown"] + 1)
                         JOB.add_log("WARN", "Post skipped", coverage_reason)
                         needs_cooldown = True
-                        JOB.update(posts_processed=index, progress=20 + round(70 * index / max(total_links, 1)))
+                        JOB.update(posts_checked=index, posts_processed=index, progress=20 + round(70 * index / max(total_links, 1)))
                         time.sleep(scraper.BASE_POST_DELAY)
                         continue
 
                     seen_in_range_post = True
+                    snapshot = JOB.snapshot()
+                    JOB.update(posts_in_range=snapshot["postsInRange"] + 1)
                     post = scraper.extract_metrics_from_loaded_post(
                         page,
                         link,
@@ -423,19 +485,13 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                     post_elapsed = time.perf_counter() - post_started
                     all_posts.append(post)
 
-                    if post.post_date_obj is not None:
-                        if oldest_post_seen is None or post.post_date_obj < oldest_post_seen:
-                            oldest_post_seen = post.post_date_obj
-                            JOB.add_log("INFO", "Oldest post so far", scraper.format_post_date(post))
-                        if newest_post_seen is None or post.post_date_obj > newest_post_seen:
-                            newest_post_seen = post.post_date_obj
-                        if not target_date_reached and post.post_date_obj.date() <= config.start_date.date():
-                            target_date_reached = True
-                            JOB.add_log(
-                                "SUCCESS",
-                                "Reached target coverage",
-                                f"Collected a post dated {scraper.format_post_date(post)}, which is on/before the target start date.",
-                            )
+                    if post.post_date_obj is not None and not target_date_reached and post.post_date_obj.date() <= config.start_date.date():
+                        target_date_reached = True
+                        JOB.add_log(
+                            "SUCCESS",
+                            "Reached target coverage",
+                            f"Collected a post dated {scraper.format_post_date(post)}, which is on/before the target start date.",
+                        )
 
                     success = post.likes is not None or post.comments is not None
                     if success:
@@ -449,6 +505,7 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                         )
                     else:
                         snapshot = JOB.snapshot()
+                        JOB.update(failed_extractions=snapshot["failedExtractions"] + 1)
                         JOB.update(errors=snapshot["errors"] + 1)
                         JOB.add_log("WARN", "Metrics incomplete", link)
                         needs_cooldown = True
@@ -456,11 +513,12 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                         JOB.add_log("WARN", "Slow extraction", f"{link} took {post_elapsed:.2f}s.")
                 except Exception as exc:
                     snapshot = JOB.snapshot()
+                    JOB.update(failed_extractions=snapshot["failedExtractions"] + 1)
                     JOB.update(errors=snapshot["errors"] + 1)
                     JOB.add_log("WARN", "Post extraction failed", f"{link} ({type(exc).__name__})")
                     needs_cooldown = True
 
-                JOB.update(posts_processed=index, progress=20 + round(70 * index / max(total_links, 1)))
+                JOB.update(posts_checked=index, posts_processed=index, progress=20 + round(70 * index / max(total_links, 1)))
                 if needs_cooldown:
                     time.sleep(scraper.BASE_POST_DELAY)
 

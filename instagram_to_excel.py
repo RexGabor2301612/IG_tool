@@ -40,8 +40,8 @@ PLAYWRIGHT_AUTO_INSTALL = os.getenv("PLAYWRIGHT_AUTO_INSTALL", "true").strip().l
 # TEST_INSTAGRAM_USERNAME = ""
 # TEST_INSTAGRAM_PASSWORD = ""
 # -----------------------------------------------------------------------------
-TEST_INSTAGRAM_USERNAME = "Lucy102825"
-TEST_INSTAGRAM_PASSWORD = "Instagram_Ni_Reks@Tool"
+TEST_INSTAGRAM_USERNAME = ""
+TEST_INSTAGRAM_PASSWORD = ""
 INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME", "").strip() or TEST_INSTAGRAM_USERNAME.strip()
 INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD", "").strip() or TEST_INSTAGRAM_PASSWORD.strip()
 # Only collect posts from this date onwards (Instagram shows newest first, so older posts appear later in scroll).
@@ -112,9 +112,9 @@ def getenv_int(name: str, default: int) -> int:
 
 SCROLL_STAGNANT_LIMIT_OVERRIDE = max(0, getenv_int("SCROLL_STAGNANT_LIMIT", 0))
 SCROLL_STOP_PROOF_ROUNDS = max(2, getenv_int("SCROLL_STOP_PROOF_ROUNDS", 2))
-SCROLL_ATTEMPTS_PER_ROUND = max(2, getenv_int("SCROLL_ATTEMPTS_PER_ROUND", 3))
+SCROLL_ATTEMPTS_PER_ROUND = max(3, getenv_int("SCROLL_ATTEMPTS_PER_ROUND", 5))
 SCROLL_EXHAUSTION_CONFIRM_TIMEOUT = max(1500, getenv_int("SCROLL_EXHAUSTION_CONFIRM_TIMEOUT", 3500))
-SCROLL_STRATEGIES = ("anchor-step", "viewport-step", "bottom-jump")
+SCROLL_STRATEGIES = ("anchor-step", "viewport-step", "mouse-wheel", "page-down", "bottom-jump")
 
 
 @dataclass
@@ -456,6 +456,29 @@ def advance_profile_grid(page, strategy: str = "anchor-step") -> dict[str, int |
         }""",
         arg=strategy,
     )
+
+
+def apply_profile_scroll_strategy(page, strategy: str) -> dict[str, int | bool | str]:
+    if strategy in {"anchor-step", "viewport-step", "bottom-jump"}:
+        return advance_profile_grid(page, strategy)
+
+    if strategy == "mouse-wheel":
+        try:
+            page.mouse.wheel(0, 2200)
+        except Exception:
+            pass
+        page.wait_for_timeout(120)
+        return get_profile_scroll_state(page)
+
+    if strategy == "page-down":
+        try:
+            page.keyboard.press("PageDown")
+        except Exception:
+            pass
+        page.wait_for_timeout(120)
+        return get_profile_scroll_state(page)
+
+    return get_profile_scroll_state(page)
 
 
 def wait_for_profile_dom_growth(
@@ -1641,6 +1664,7 @@ def collect_post_links(
     log_hook: Optional[LogHook] = None,
     progress_hook: Optional[ProgressHook] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    diagnostics: Optional[dict[str, Any]] = None,
 ) -> List[str]:
     links = {}  # Use dict instead of set to preserve insertion order (Python 3.7+)
     stagnant = 0
@@ -1660,6 +1684,8 @@ def collect_post_links(
         stagnant_limit = max(stagnant_limit, 12)
         min_rounds_before_stop = scroll_rounds
         proof_rounds_required = max(proof_rounds_required, 3)
+
+    stop_reason = f"Reached max scroll rounds ({scroll_rounds})."
 
     wait_for_profile_ready(page)
     print(
@@ -1694,11 +1720,17 @@ def collect_post_links(
         print(f"  Initial grid: +{len(links)} links (total={len(links)})")
         emit_log(log_hook, "INFO", "Initial grid", f"+{len(links)} new links (total={len(links)}).")
         if probe_page is not None:
+            newest_link = next(iter(links))
+            newest_date = probe_post_date(probe_page, newest_link, log_hook=log_hook)
+            if newest_date is not None:
+                newest_visible_date_seen = newest_date
+                emit_log(log_hook, "INFO", "Newest post so far", newest_date.strftime(DATE_INPUT_FORMAT))
             initial_oldest_link = next(reversed(links))
             oldest_date = probe_post_date(probe_page, initial_oldest_link, log_hook=log_hook)
             if oldest_date is not None:
                 oldest_visible_date_seen = oldest_date
-                newest_visible_date_seen = oldest_date
+                if newest_visible_date_seen is None:
+                    newest_visible_date_seen = oldest_date
                 last_probed_oldest_link = initial_oldest_link
                 emit_log(log_hook, "INFO", "Oldest post so far", oldest_date.strftime(DATE_INPUT_FORMAT))
     emit_progress(progress_hook, 0, scroll_rounds, len(links))
@@ -1725,7 +1757,7 @@ def collect_post_links(
             attempts_used = attempt_index + 1
 
             try:
-                advance_profile_grid(page, strategy_used)
+                apply_profile_scroll_strategy(page, strategy_used)
                 current_state = wait_for_profile_dom_growth(page, previous_state, SCROLL_WAIT_TIMEOUT)
                 found = collect_visible_post_links(page)
             except Exception:
@@ -1768,7 +1800,8 @@ def collect_post_links(
             f"strategy={strategy_used}, attempts={attempts_used}, root={current_state['scrollRoot']}({current_state['scrollRootSource']}), "
             f"root_height={previous_state['scrollHeight']}->{current_state['scrollHeight']}, "
             f"body_height={previous_state['bodyHeight']}->{current_state['bodyHeight']}, "
-            f"top={previous_state['scrollTop']}->{current_state['scrollTop']}"
+            f"top={previous_state['scrollTop']}->{current_state['scrollTop']}, "
+            f"anchors={before}->{len(links)}"
         )
 
         if new_count > 0:
@@ -1790,14 +1823,14 @@ def collect_post_links(
                         oldest_visible_date_seen = oldest_date
                         newest_visible_date_seen = newest_visible_date_seen or oldest_date
                         emit_log(log_hook, "INFO", "Oldest post so far", oldest_date.strftime(DATE_INPUT_FORMAT))
-                        if target_start_date is not None and oldest_date.date() < target_start_date.date():
+                        if target_start_date is not None and oldest_date.date() <= target_start_date.date():
                             coverage_reached = True
                             emit_log(
                                 log_hook,
                                 "SUCCESS",
-                                "Stopped because older than start date reached",
+                                "Reached target date while scrolling",
                                 (
-                                    f"Oldest visible post {oldest_date.strftime(DATE_INPUT_FORMAT)} is older than "
+                                    f"Oldest visible post {oldest_date.strftime(DATE_INPUT_FORMAT)} is on/before "
                                     f"start date {target_start_date.strftime(DATE_INPUT_FORMAT)}."
                                 ),
                             )
@@ -1854,12 +1887,18 @@ def collect_post_links(
         emit_progress(progress_hook, scroll_round, scroll_rounds, len(links))
 
         if coverage_reached:
+            stop_reason = (
+                f"Reached target start date {target_start_date.strftime(DATE_INPUT_FORMAT)} while scrolling; "
+                f"oldest visible post is {oldest_visible_date_seen.strftime(DATE_INPUT_FORMAT) if oldest_visible_date_seen else 'unknown'}."
+            )
+            emit_log(log_hook, "INFO", "Link collection stopped", stop_reason)
             stopped_early = True
             break
 
         if max_posts is not None and len(links) >= max_posts:
             print(f"Reached max_posts limit: {max_posts}")
             emit_log(log_hook, "INFO", "Link collection stopped", f"Reached max_posts limit: {max_posts}.")
+            stop_reason = f"Reached max_posts limit: {max_posts}."
             stopped_early = True
             break
 
@@ -1896,6 +1935,10 @@ def collect_post_links(
                 "Link collection stopped",
                 f"Reached strong end-of-profile proof after {scroll_round} rounds (stagnant={stagnant}, proof={no_more_posts_proof}).",
             )
+            stop_reason = (
+                f"Reached strong end-of-profile proof after {scroll_round} rounds "
+                f"(stagnant={stagnant}, proof={no_more_posts_proof})."
+            )
             stopped_early = True
             break
 
@@ -1910,6 +1953,20 @@ def collect_post_links(
             "INFO",
             "Link collection stopped",
             f"Reached max scroll rounds ({scroll_rounds}) with {len(links)} unique links collected.",
+        )
+
+    if diagnostics is not None:
+        diagnostics.clear()
+        diagnostics.update(
+            {
+                "totalLinksCollected": len(links),
+                "oldestVisibleDate": oldest_visible_date_seen,
+                "newestVisibleDate": newest_visible_date_seen,
+                "stopReason": stop_reason,
+                "coverageReached": coverage_reached,
+                "stagnantCount": stagnant,
+                "exhaustionProof": no_more_posts_proof,
+            }
         )
 
     print(f"Collection complete: {len(links)} unique links found\n")
