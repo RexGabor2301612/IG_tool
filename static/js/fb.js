@@ -233,8 +233,8 @@ document.addEventListener("DOMContentLoaded", function () {
             browserSessionStatusText.textContent = "Browser session created. Checking Facebook login state.";
         } else if (data.status === "waiting_verification" || data.verificationRequired) {
             browserSessionStatusText.textContent = data.localBrowserWindow
-                ? "Facebook requires verification. Complete it in Chromium before extraction can continue."
-                : "Facebook requires verification, but this environment has no local browser window.";
+                ? "Facebook verification required"
+                : "Facebook verification required, but this environment has no local browser window.";
         } else if (data.status === "waiting_login") {
             browserSessionStatusText.textContent = data.localBrowserWindow
                 ? "Browser opened. Complete Facebook login in Chromium."
@@ -247,8 +247,8 @@ document.addEventListener("DOMContentLoaded", function () {
             browserSessionStatusText.textContent = "Extraction completed. Excel is ready.";
         } else if (data.status === "failed") {
             browserSessionStatusText.textContent = "Extraction failed. Check activity logs.";
-        } else if (data.status === "stopped") {
-            browserSessionStatusText.textContent = "Extraction stopped.";
+        } else if (data.status === "cancelled") {
+            browserSessionStatusText.textContent = "Extraction cancelled.";
         } else {
             browserSessionStatusText.textContent = "No browser session yet.";
         }
@@ -260,7 +260,7 @@ document.addEventListener("DOMContentLoaded", function () {
         } else if (data.status === "preparing") {
             goStatusText.textContent = "Preparing browser session.";
         } else if (data.status === "waiting_verification" || data.verificationRequired) {
-            goStatusText.textContent = "Waiting for Facebook verification.";
+            goStatusText.textContent = "Facebook verification required.";
         } else if (data.status === "waiting_login") {
             goStatusText.textContent = "Waiting for Facebook login.";
         } else if (data.status === "ready") {
@@ -276,7 +276,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
     function setButtonStates(data) {
         const status = data.status || "idle";
-        const activeStatuses = ["preparing", "running", "stopping", "waiting_login", "waiting_verification", "ready", "paused"].includes(status);
+        const activeStatuses = ["preparing", "running", "waiting_login", "waiting_verification", "ready"].includes(status);
 
         confirmStartBtn.disabled = activeStatuses;
         runStartBtn.disabled = activeStatuses;
