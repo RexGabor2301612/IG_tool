@@ -82,6 +82,23 @@ LogHook = Callable[[str, str, str], None]
 ProgressHook = Callable[[int, int, int], None]
 
 
+def getenv_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name, "").strip()
+    if not raw_value:
+        return default
+
+    try:
+        return int(raw_value)
+    except ValueError:
+        return default
+
+
+SCROLL_STAGNANT_LIMIT_OVERRIDE = max(0, getenv_int("SCROLL_STAGNANT_LIMIT", 0))
+SCROLL_STOP_PROOF_ROUNDS = max(2, getenv_int("SCROLL_STOP_PROOF_ROUNDS", 2))
+SCROLL_ATTEMPTS_PER_ROUND = max(2, getenv_int("SCROLL_ATTEMPTS_PER_ROUND", 3))
+SCROLL_STRATEGIES = ("anchor-step", "viewport-step", "bottom-jump")
+
+
 @dataclass
 class PostData:
     url: str
@@ -180,6 +197,23 @@ def wait_for_more_profile_links(page, previous_count: int, timeout_ms: int = SCR
         return False
 
 
+def get_effective_stagnant_limit(scroll_rounds: int) -> int:
+    if SCROLL_STAGNANT_LIMIT_OVERRIDE > 0:
+        return SCROLL_STAGNANT_LIMIT_OVERRIDE
+
+    if scroll_rounds <= 0:
+        return MAX_STAGNANT_ROUNDS
+
+    return max(MAX_STAGNANT_ROUNDS, min(18, max(8, scroll_rounds // 3)))
+
+
+def get_minimum_rounds_before_stop(scroll_rounds: int, stagnant_limit: int) -> int:
+    if scroll_rounds <= 0:
+        return stagnant_limit
+
+    return min(scroll_rounds, max(8, min(15, stagnant_limit)))
+
+
 def get_profile_scroll_state(page) -> dict[str, int | bool]:
     return page.evaluate(
         """() => {
@@ -206,18 +240,35 @@ def get_profile_scroll_state(page) -> dict[str, int | bool]:
     )
 
 
-def advance_profile_grid(page) -> dict[str, int | bool]:
+def advance_profile_grid(page, strategy: str = "anchor-step") -> dict[str, int | bool]:
     return page.evaluate(
-        """() => {
+        """(strategy) => {
             const doc = document.scrollingElement || document.documentElement;
             const anchors = Array.from(document.querySelectorAll("a[href*='/p/'], a[href*='/reel/']"));
+            const beforeTop = Number(doc.scrollTop || window.pageYOffset || 0);
+            const viewportHeight = Number(window.innerHeight || doc.clientHeight || 0);
+
             if (anchors.length) {
-                anchors[anchors.length - 1].scrollIntoView({ block: 'end', inline: 'nearest' });
+                const targetAnchor =
+                    strategy === 'anchor-step' ? anchors[anchors.length - 1]
+                    : strategy === 'viewport-step' ? anchors[Math.max(0, anchors.length - 3)]
+                    : anchors[anchors.length - 1];
+                targetAnchor.scrollIntoView({ block: 'end', inline: 'nearest' });
             }
 
-            const beforeTop = Number(doc.scrollTop || window.pageYOffset || 0);
-            const step = Math.max(Math.floor((window.innerHeight || 900) * 0.9), 900);
-            window.scrollBy(0, step);
+            let step = Math.max(Math.floor((viewportHeight || 900) * 0.9), 900);
+            if (strategy === 'viewport-step') {
+                step = Math.max(Math.floor((viewportHeight || 900) * 1.4), 1200);
+                window.scrollBy(0, step);
+            } else if (strategy === 'bottom-jump') {
+                const target = Math.max(
+                    Number(doc.scrollHeight || 0),
+                    document.body ? Number(document.body.scrollHeight || 0) : 0
+                );
+                window.scrollTo(0, target);
+            } else {
+                window.scrollBy(0, step);
+            }
 
             const afterScrollTop = Number(doc.scrollTop || window.pageYOffset || 0);
             if (afterScrollTop <= beforeTop + 5) {
@@ -230,8 +281,10 @@ def advance_profile_grid(page) -> dict[str, int | bool]:
                     doc.scrollHeight || 0,
                     document.body ? document.body.scrollHeight : 0
                 )),
+                moved: afterScrollTop > beforeTop + 24,
             };
-        }"""
+        }""",
+        arg=strategy,
     )
 
 
@@ -1231,9 +1284,22 @@ def collect_post_links(
 ) -> List[str]:
     links = {}  # Use dict instead of set to preserve insertion order (Python 3.7+)
     stagnant = 0
+    no_more_posts_proof = 0
+    stagnant_limit = get_effective_stagnant_limit(scroll_rounds)
+    min_rounds_before_stop = get_minimum_rounds_before_stop(scroll_rounds, stagnant_limit)
 
     wait_for_profile_ready(page)
-    print(f"Starting collection: max_rounds={scroll_rounds}, stagnant_limit={MAX_STAGNANT_ROUNDS}")
+    print(
+        "Starting collection: "
+        f"max_rounds={scroll_rounds}, stagnant_limit={stagnant_limit}, "
+        f"proof_rounds={SCROLL_STOP_PROOF_ROUNDS}, min_rounds_before_stop={min_rounds_before_stop}"
+    )
+    emit_log(
+        log_hook,
+        "INFO",
+        "Collection config",
+        f"max_rounds={scroll_rounds}, stagnant_limit={stagnant_limit}, proof_rounds={SCROLL_STOP_PROOF_ROUNDS}.",
+    )
 
     initial_found = collect_visible_post_links(page)
     for href in initial_found:
@@ -1251,53 +1317,108 @@ def collect_post_links(
 
         round_started = time.perf_counter()
         previous_state = get_profile_scroll_state(page)
-
-        try:
-            advance_profile_grid(page)
-            current_state = wait_for_profile_dom_growth(page, previous_state, SCROLL_WAIT_TIMEOUT)
-            found = collect_visible_post_links(page)
-        except Exception:
-            print(f"  Scroll {scroll_round}: Failed to find links")
-            emit_log(log_hook, "WARN", f"Scroll {scroll_round}", "Failed to inspect profile grid after scrolling.")
-            page.wait_for_timeout(PROFILE_RETRY_MS)
-            continue
-
+        current_state = previous_state
         before = len(links)
-        for href in found:
-            if href:
-                clean_url = href.split("?")[0]
-                if clean_url not in links:
-                    links[clean_url] = True  # Add to dict to preserve order
+        dom_changed = False
+        scrolled = False
+        height_grew = False
+        movement_grew = False
+        at_bottom_with_no_growth = False
+        strategy_used = "none"
+
+        for attempt_index in range(SCROLL_ATTEMPTS_PER_ROUND):
+            strategy_used = SCROLL_STRATEGIES[min(attempt_index, len(SCROLL_STRATEGIES) - 1)]
+
+            try:
+                advance_profile_grid(page, strategy_used)
+                current_state = wait_for_profile_dom_growth(page, previous_state, SCROLL_WAIT_TIMEOUT)
+                found = collect_visible_post_links(page)
+            except Exception:
+                print(f"  Scroll {scroll_round}: Failed to inspect grid using {strategy_used}")
+                emit_log(
+                    log_hook,
+                    "WARN",
+                    f"Scroll {scroll_round}",
+                    f"Failed to inspect profile grid after {strategy_used}.",
+                )
+                page.wait_for_timeout(PROFILE_RETRY_MS)
+                continue
+
+            for href in found:
+                if href:
+                    clean_url = href.split("?")[0]
+                    if clean_url not in links:
+                        links[clean_url] = True  # Add to dict to preserve order
+
+            scrolled = scrolled or bool(current_state["scrollTop"] > previous_state["scrollTop"] + 24)
+            height_grew = height_grew or bool(current_state["scrollHeight"] > previous_state["scrollHeight"] + 24)
+            movement_grew = movement_grew or bool(current_state["linkCount"] > previous_state["linkCount"])
+            dom_changed = dom_changed or scrolled or height_grew or movement_grew
+
+            if len(links) > before:
+                break
+
+            at_bottom_with_no_growth = bool(
+                previous_state["atBottom"]
+                and current_state["atBottom"]
+                and current_state["scrollHeight"] <= previous_state["scrollHeight"] + 24
+                and current_state["scrollTop"] <= previous_state["scrollTop"] + 24
+            )
+            previous_state = current_state
 
         new_count = len(links) - before
-        dom_changed = (
-            current_state["linkCount"] > previous_state["linkCount"] or
-            current_state["scrollHeight"] > previous_state["scrollHeight"] + 24 or
-            current_state["scrollTop"] > previous_state["scrollTop"] + 24
-        )
 
         if new_count > 0:
             stagnant = 0
+            no_more_posts_proof = 0
             print(f"  Scroll {scroll_round}: +{new_count} new links (total={len(links)})")
-            emit_log(log_hook, "INFO", f"Scroll {scroll_round}", f"+{new_count} new links (total={len(links)}).")
+            emit_log(
+                log_hook,
+                "INFO",
+                f"Scroll {scroll_round}",
+                f"+{new_count} new links (total={len(links)}, strategy={strategy_used}, height={current_state['scrollHeight']}, top={current_state['scrollTop']}).",
+            )
         else:
             if dom_changed:
                 stagnant = 0
+                no_more_posts_proof = 0
                 print(f"  Scroll {scroll_round}: +0 new links but content moved (total={len(links)})")
                 emit_log(
                     log_hook,
                     "INFO",
                     f"Scroll {scroll_round}",
-                    f"+0 new links; content moved (height={current_state['scrollHeight']}, top={current_state['scrollTop']}).",
+                    f"+0 new links; content moved after {strategy_used} (height={current_state['scrollHeight']}, top={current_state['scrollTop']}, moved={scrolled}, height_grew={height_grew}).",
                 )
             else:
                 stagnant += 1
-                print(f"  Scroll {scroll_round}: +0 (stagnant {stagnant}/{MAX_STAGNANT_ROUNDS}, total={len(links)})")
+                if at_bottom_with_no_growth:
+                    no_more_posts_proof += 1
+                    reason = (
+                        f"+0 new links; at bottom with no DOM growth "
+                        f"(proof {no_more_posts_proof}/{SCROLL_STOP_PROOF_ROUNDS}, "
+                        f"stagnant {stagnant}/{stagnant_limit}, total={len(links)})."
+                    )
+                    print(f"  Scroll {scroll_round}: {reason}")
+                elif not scrolled:
+                    no_more_posts_proof = 0
+                    reason = (
+                        f"+0 new links; scroll did not move after {strategy_used} "
+                        f"(lazy loading may have stalled, stagnant {stagnant}/{stagnant_limit}, total={len(links)})."
+                    )
+                    print(f"  Scroll {scroll_round}: {reason}")
+                else:
+                    no_more_posts_proof = 0
+                    reason = (
+                        f"+0 new links after {strategy_used} "
+                        f"(stagnant {stagnant}/{stagnant_limit}, total={len(links)})."
+                    )
+                    print(f"  Scroll {scroll_round}: {reason}")
+
                 emit_log(
                     log_hook,
                     "INFO",
                     f"Scroll {scroll_round}",
-                    f"+0 new links (stagnant {stagnant}/{MAX_STAGNANT_ROUNDS}, total={len(links)}).",
+                    reason,
                 )
 
         emit_progress(progress_hook, scroll_round, scroll_rounds, len(links))
@@ -1307,9 +1428,21 @@ def collect_post_links(
             emit_log(log_hook, "INFO", "Link collection stopped", f"Reached max_posts limit: {max_posts}.")
             break
 
-        if stagnant >= MAX_STAGNANT_ROUNDS:
-            print(f"Stopping: {MAX_STAGNANT_ROUNDS} stagnant rounds reached")
-            emit_log(log_hook, "INFO", "Link collection stopped", "No new links after repeated scrolls.")
+        if (
+            scroll_round >= min_rounds_before_stop
+            and stagnant >= stagnant_limit
+            and no_more_posts_proof >= SCROLL_STOP_PROOF_ROUNDS
+        ):
+            print(
+                f"Stopping: strong proof of exhaustion after {scroll_round} rounds "
+                f"(stagnant={stagnant}/{stagnant_limit}, proof={no_more_posts_proof}/{SCROLL_STOP_PROOF_ROUNDS})"
+            )
+            emit_log(
+                log_hook,
+                "INFO",
+                "Link collection stopped",
+                f"Reached strong end-of-profile proof after {scroll_round} rounds (stagnant={stagnant}, proof={no_more_posts_proof}).",
+            )
             break
 
         elapsed = time.perf_counter() - round_started
