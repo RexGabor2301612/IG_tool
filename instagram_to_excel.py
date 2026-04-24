@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -40,8 +40,8 @@ PLAYWRIGHT_AUTO_INSTALL = os.getenv("PLAYWRIGHT_AUTO_INSTALL", "true").strip().l
 # TEST_INSTAGRAM_USERNAME = ""
 # TEST_INSTAGRAM_PASSWORD = ""
 # -----------------------------------------------------------------------------
-TEST_INSTAGRAM_USERNAME = ""
-TEST_INSTAGRAM_PASSWORD = ""
+TEST_INSTAGRAM_USERNAME = "Lucy102825"
+TEST_INSTAGRAM_PASSWORD = "Instagram_Ni_Reks@Tool"
 INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME", "").strip() or TEST_INSTAGRAM_USERNAME.strip()
 INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD", "").strip() or TEST_INSTAGRAM_PASSWORD.strip()
 # Only collect posts from this date onwards (Instagram shows newest first, so older posts appear later in scroll).
