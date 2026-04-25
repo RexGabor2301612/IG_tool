@@ -19,6 +19,17 @@ DATE_INPUT_FORMAT = "%Y-%m-%d"
 VALID_FACEBOOK_HOSTS = {"facebook.com", "www.facebook.com", "m.facebook.com", "fb.com", "www.fb.com"}
 INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
 BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
+VERIFICATION_URL_TOKENS = [
+    "/checkpoint/",
+    "/checkpoint",
+    "/login/identify",
+    "/two_step_verification",
+    "/authentication/",
+    "/authentication",
+    "/authentication?",
+    "/captcha/",
+    "recaptcha",
+]
 
 PLAYWRIGHT_STORAGE_STATE = os.getenv("PLAYWRIGHT_STORAGE_STATE", "").strip() or None
 DEFAULT_STORAGE_STATE_FILE = Path("storage_states/facebook_auth.json")
@@ -295,6 +306,11 @@ def has_authenticated_session(context) -> bool:
     return any(cookie.get("name") == "c_user" for cookie in cookies)
 
 
+def url_indicates_checkpoint_or_verification(url: str) -> bool:
+    normalized = (url or "").lower()
+    return any(token in normalized for token in VERIFICATION_URL_TOKENS)
+
+
 def detect_checkpoint_or_verification(page) -> tuple[bool, str]:
     current_url = ""
     try:
@@ -302,20 +318,7 @@ def detect_checkpoint_or_verification(page) -> tuple[bool, str]:
     except Exception:
         current_url = ""
 
-    if any(
-        token in current_url
-        for token in [
-            "/checkpoint/",
-            "/checkpoint",
-            "/login/identify",
-            "/two_step_verification",
-            "/authentication/",
-            "/authentication",
-            "/authentication?",
-            "/captcha/",
-            "recaptcha",
-        ]
-    ):
+    if url_indicates_checkpoint_or_verification(current_url):
         return True, "Facebook checkpoint or verification page detected."
 
     try:
