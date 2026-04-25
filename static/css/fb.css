@@ -135,6 +135,7 @@ button {
     display: flex;
     flex-direction: column;
     gap: 22px;
+    min-width: 0;
 }
 
 .badge {
@@ -760,7 +761,12 @@ button {
     background: rgba(239, 68, 68, 0.2);
     color: #fecaca;
 }
+
 .status-running[data-status="cancelled"] {
+    background: rgba(239, 68, 68, 0.16);
+    color: #fecaca;
+}
+
 .log-action-row {
     margin-top: 14px;
     display: flex;
@@ -796,6 +802,7 @@ button {
 .feature-card {
     border-radius: 18px;
     padding: 18px;
+    min-width: 0;
 }
 
 .stat-label {

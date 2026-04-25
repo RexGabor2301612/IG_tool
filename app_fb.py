@@ -247,6 +247,7 @@ DASHBOARD_HUB = DashboardHub()
 CONTROL_BUS = LiveCommandBus()
 LOGIN_READY_TIMEOUT = 180000
 PAGE_READY_TIMEOUT = 30000
+VERIFICATION_READY_TIMEOUT = 1800000
 
 
 def using_local_browser_window() -> bool:
@@ -486,7 +487,8 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
     if not using_local_browser_window():
         raise RuntimeError(message)
 
-    deadline = time.monotonic() + (LOGIN_READY_TIMEOUT / 1000)
+    login_deadline = time.monotonic() + (LOGIN_READY_TIMEOUT / 1000)
+    verification_deadline = None
     login_form_logged = False
     login_page_opened = False
     returned_to_target = False
@@ -495,7 +497,7 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
     verification_logged = False
     last_verification_ping = 0.0
 
-    while time.monotonic() < deadline:
+    while True:
         if JOB.should_cancel():
             raise ScrapeCancelled("Cancelled while waiting for Facebook login.")
 
@@ -504,6 +506,8 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
 
         checkpoint_required, checkpoint_reason = scraper.detect_checkpoint_or_verification(page)
         if checkpoint_required:
+            if verification_deadline is None:
+                verification_deadline = time.monotonic() + (VERIFICATION_READY_TIMEOUT / 1000)
             JOB.update(
                 status="waiting_verification",
                 active_task="Facebook verification required",
@@ -527,8 +531,13 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
             elif time.monotonic() - last_verification_ping >= 10:
                 JOB.add_log("INFO", "Still waiting for verification", "Facebook verification is still active. Complete it manually in the opened browser.")
                 last_verification_ping = time.monotonic()
+            if verification_deadline is not None and time.monotonic() >= verification_deadline:
+                raise TimeoutError("Facebook verification did not complete before timeout. Please try again after completing the checkpoint manually.")
             time.sleep(0.35)
             continue
+
+        if verification_logged and verification_deadline is not None and time.monotonic() >= verification_deadline:
+            raise TimeoutError("Facebook verification did not complete before timeout. Please try again after completing the checkpoint manually.")
 
         if scraper.page_ready_for_collection(page):
             JOB.add_log("INFO", "Checking session cookies", "Verifying whether Facebook session cookies are present.")
@@ -606,9 +615,10 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
             except Exception as exc:
                 JOB.add_log("WARN", "Target reload after login failed", f"{type(exc).__name__}: {exc}")
 
-        time.sleep(0.3)
+        if time.monotonic() >= login_deadline:
+            raise TimeoutError("Facebook login was required, but the session was not completed before timeout.")
 
-    raise TimeoutError("Facebook login was required, but the session was not completed before timeout.")
+        time.sleep(0.3)
 
 
 def wait_for_go_signal(page, target_url: str) -> None:
