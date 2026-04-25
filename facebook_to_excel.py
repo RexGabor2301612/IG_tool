@@ -83,6 +83,14 @@ POST_LINK_SELECTOR = (
 )
 FEED_READY_SELECTOR = "div[role='feed'], div[role='feed'] div[role='article']"
 PAGE_READY_SELECTOR = f"{POST_LINK_SELECTOR}, {FEED_READY_SELECTOR}"
+PAGE_SHELL_READY_SELECTOR = (
+    "div[role='main'] h1, "
+    "div[role='main'] div[role='tablist'], "
+    "div[role='main'] a[href*='/about'], "
+    "div[role='main'] a[href*='/followers'], "
+    "div[role='main'] a[href*='/photos'], "
+    "div[role='main'] a[href*='/videos']"
+)
 LOGIN_FORM_SELECTOR = "input[name='email'], input[name='pass'], form[action*='login']"
 
 LogHook = Callable[[str, str, str], None]
@@ -311,6 +319,10 @@ def profile_content_visible(page, timeout_ms: int = 500) -> bool:
     return wait_for_selector(page, PAGE_READY_SELECTOR, timeout_ms)
 
 
+def page_shell_visible(page, timeout_ms: int = 500) -> bool:
+    return wait_for_selector(page, PAGE_SHELL_READY_SELECTOR, timeout_ms)
+
+
 def visible_post_anchor_count(page) -> int:
     try:
         return int(page.locator(POST_LINK_SELECTOR).count())
@@ -329,6 +341,23 @@ def has_authenticated_session(context) -> bool:
 def url_indicates_checkpoint_or_verification(url: str) -> bool:
     normalized = (url or "").lower()
     return any(token in normalized for token in VERIFICATION_URL_TOKENS)
+
+
+def current_url_matches_target(current_url: str, target_url: str) -> bool:
+    if not current_url or not target_url:
+        return False
+    try:
+        current = urlparse(current_url)
+        target = urlparse(target_url)
+    except Exception:
+        return False
+    current_host = (current.hostname or "").lower()
+    target_host = (target.hostname or "").lower()
+    if current_host != target_host:
+        return False
+    current_path = (current.path or "/").rstrip("/") or "/"
+    target_path = (target.path or "/").rstrip("/") or "/"
+    return current_path == target_path
 
 
 def detect_checkpoint_or_verification(page) -> tuple[bool, str]:
@@ -422,13 +451,22 @@ def detect_login_gate(page) -> tuple[bool, str]:
     return False, ""
 
 
-def page_ready_for_collection(page) -> bool:
+def page_ready_for_collection(page, target_url: str = "") -> bool:
     login_required, _ = detect_login_gate(page)
     if login_required:
         return False
     if visible_post_anchor_count(page) > 0:
         return True
-    return wait_for_selector(page, FEED_READY_SELECTOR, 800)
+    if wait_for_selector(page, FEED_READY_SELECTOR, 800):
+        return True
+    current_url = ""
+    try:
+        current_url = page.url or ""
+    except Exception:
+        current_url = ""
+    if target_url and current_url_matches_target(current_url, target_url) and page_shell_visible(page, 800):
+        return True
+    return False
 
 
 def validate_session(page, context=None, target_url: str = "") -> dict[str, Any]:
@@ -450,7 +488,7 @@ def validate_session(page, context=None, target_url: str = "") -> dict[str, Any]
             "cookiesPresent": bool(context and has_authenticated_session(context)),
         }
 
-    if page_ready_for_collection(page):
+    if page_ready_for_collection(page, target_url):
         return {
             "state": "ready",
             "reason": "Facebook page or feed content is visible.",

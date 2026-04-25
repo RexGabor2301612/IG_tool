@@ -570,7 +570,7 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
         if verification_logged and verification_deadline is not None and time.monotonic() >= verification_deadline:
             raise TimeoutError("Facebook verification did not complete before timeout. Please try again after completing the checkpoint manually.")
 
-        if scraper.page_ready_for_collection(page):
+        if scraper.page_ready_for_collection(page, target_url):
             JOB.add_log("INFO", "Checking session cookies", "Verifying whether Facebook session cookies are present.")
             cookies_present = scraper.has_authenticated_session(context)
             if (verification_logged or login_submit_logged) and not cookies_present:

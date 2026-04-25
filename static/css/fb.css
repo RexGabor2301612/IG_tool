@@ -459,10 +459,28 @@ button {
 
 .mini-card h4,
 .browser-session-card strong {
+    display: block;
     margin: 10px 0 0;
     font-size: 1.1rem;
     line-height: 1.35;
+    overflow-wrap: anywhere;
     word-break: break-word;
+}
+
+#currentPostText,
+#browserSessionUrlText {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+}
+
+#currentPostText {
+    -webkit-line-clamp: 6;
+}
+
+#browserSessionUrlText {
+    -webkit-line-clamp: 4;
 }
 
 .progress-block {

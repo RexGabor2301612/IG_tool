@@ -219,6 +219,14 @@ document.addEventListener("DOMContentLoaded", function () {
         }
     }
 
+    function formatDisplayUrl(value, maxLength = 88) {
+        const raw = String(value || "").trim();
+        if (!raw) return "-";
+        const compact = raw.replace(/^https?:\/\//i, "");
+        if (compact.length <= maxLength) return compact;
+        return `${compact.slice(0, maxLength - 1)}…`;
+    }
+
     function applyBrowserSessionState(data) {
         const modeLabel = data.browserModeLabel || "Browser Session";
         const modeNote = data.browserModeNote || "Run / Start opens Chromium for Facebook login when needed.";
@@ -227,7 +235,8 @@ document.addEventListener("DOMContentLoaded", function () {
 
         browserModeText.textContent = modeLabel;
         browserModeDescription.textContent = modeNote;
-        browserSessionUrlText.textContent = currentUrl || "-";
+        browserSessionUrlText.textContent = formatDisplayUrl(currentUrl, 86);
+        browserSessionUrlText.title = currentUrl || "-";
 
         if (data.status === "loading_session") {
             browserSessionStatusText.textContent = "Checking saved Facebook session and page access.";
@@ -301,7 +310,9 @@ document.addEventListener("DOMContentLoaded", function () {
         document.getElementById("statusBadge").textContent = latestStatus.status || "idle";
         document.getElementById("statusBadge").dataset.status = latestStatus.status || "idle";
         document.getElementById("scrollRoundText").textContent = `Round ${currentRound} / ${totalRounds}`;
-        document.getElementById("currentPostText").textContent = latestStatus.currentPost || "None";
+        const currentItemText = document.getElementById("currentPostText");
+        currentItemText.textContent = formatDisplayUrl(latestStatus.currentPost || "None", 110);
+        currentItemText.title = latestStatus.currentPost || "None";
         document.getElementById("outputFileText").textContent = latestStatus.outputFile || (lastValidatedConfig?.outputFile || "Not selected");
 
         document.getElementById("statPostsFound").textContent = latestStatus.postsFound ?? 0;
