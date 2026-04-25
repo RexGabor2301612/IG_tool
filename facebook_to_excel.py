@@ -6,10 +6,10 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
-from urllib.parse import quote, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 from openpyxl import Workbook
 from playwright.sync_api import Error as PlaywrightError
@@ -72,6 +72,8 @@ PROFILE_RETRY_MS = 800
 BASE_POST_DELAY = 0.15
 SLOW_SCROLL_SECONDS = 2.0
 SLOW_POST_SECONDS = 4.0
+COMMENT_LOAD_WAIT_MS = 650
+COMMENT_EXPANSION_ROUNDS = 4
 
 POST_LINK_SELECTOR = (
     "a[href*='/posts/'], "
@@ -103,6 +105,7 @@ class CommentData:
     commenter_name: str
     comment_text: str
     comment_date_raw: str = ""
+    thread_type: str = "Comment"
 
 
 @dataclass
@@ -281,23 +284,140 @@ def parse_count(value: Optional[str]) -> Optional[int]:
     return int(digits) if digits else None
 
 
+def get_target_page_slug(target_url: str) -> str:
+    try:
+        parsed = urlparse(target_url)
+    except Exception:
+        return ""
+    path = (parsed.path or "").strip("/")
+    if not path:
+        return ""
+    return path.split("/")[0].strip().lower()
+
+
+def normalize_facebook_post_url(raw_value: str, target_url: str = "") -> Optional[str]:
+    if not raw_value:
+        return None
+
+    try:
+        parsed = urlparse(raw_value)
+    except Exception:
+        return None
+
+    host = (parsed.hostname or "").lower()
+    if host and host not in VALID_FACEBOOK_HOSTS:
+        return None
+
+    path = (parsed.path or "").rstrip("/")
+    lower_path = path.lower()
+    if not any(marker in lower_path for marker in ("/posts/", "/videos/", "/permalink/", "/watch/", "/photo.php")) and "story_fbid=" not in (parsed.query or "").lower():
+        return None
+
+    target_slug = get_target_page_slug(target_url)
+    if target_slug and path.strip("/"):
+        first_segment = path.strip("/").split("/")[0].strip().lower()
+        slug_style = any(marker in lower_path for marker in ("/posts/", "/videos/", "/photos/", "/reels/", "/permalink/"))
+        if slug_style and first_segment and first_segment not in {target_slug, "photo.php", "watch", "permalink.php"}:
+            return None
+
+    keep_query_keys = {"story_fbid", "id", "fbid", "set", "type", "theater", "v"}
+    query_pairs = []
+    for key, value in parse_qsl(parsed.query, keep_blank_values=False):
+        key_lower = key.lower()
+        if key_lower in {"comment_id", "reply_comment_id", "notif_id", "notif_t", "ref", "__cft__", "__tn__"}:
+            continue
+        if key_lower in keep_query_keys:
+            query_pairs.append((key, value))
+
+    query = urlencode(query_pairs, doseq=True)
+    normalized = parsed._replace(params="", query=query, fragment="")
+    return urlunparse(normalized)
+
+
+def dedupe_post_links(raw_links: list[str], target_url: str = "") -> list[str]:
+    seen: dict[str, bool] = {}
+    for raw_value in raw_links:
+        normalized = normalize_facebook_post_url(raw_value, target_url=target_url)
+        if not normalized or normalized in seen:
+            continue
+        seen[normalized] = True
+    return list(seen.keys())
+
+
 def parse_facebook_datetime(raw_value: str) -> Optional[datetime]:
     if not raw_value:
         return None
 
     text = raw_value.strip()
+    normalized = re.sub(r"\s+", " ", text.lower()).strip()
+    now = datetime.now()
+
+    short_relative_match = re.fullmatch(r"(\d+)\s*([smhdw])", normalized)
+    if short_relative_match:
+        amount = int(short_relative_match.group(1))
+        unit = short_relative_match.group(2)
+        if unit == "s":
+            return now - timedelta(seconds=amount)
+        if unit == "m":
+            return now - timedelta(minutes=amount)
+        if unit == "h":
+            return now - timedelta(hours=amount)
+        if unit == "d":
+            return now - timedelta(days=amount)
+        if unit == "w":
+            return now - timedelta(weeks=amount)
+
+    relative_match = re.search(r"(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago", normalized)
+    if relative_match:
+        amount = int(relative_match.group(1))
+        unit = relative_match.group(2)
+        if unit == "second":
+            return now - timedelta(seconds=amount)
+        if unit == "minute":
+            return now - timedelta(minutes=amount)
+        if unit == "hour":
+            return now - timedelta(hours=amount)
+        if unit == "day":
+            return now - timedelta(days=amount)
+        if unit == "week":
+            return now - timedelta(weeks=amount)
+        if unit == "month":
+            return now - timedelta(days=amount * 30)
+        if unit == "year":
+            return now - timedelta(days=amount * 365)
+
+    if normalized.startswith("today"):
+        return now
+
+    yesterday_match = re.search(r"yesterday(?: at (.+))?$", normalized)
+    if yesterday_match:
+        base = now - timedelta(days=1)
+        time_part = (yesterday_match.group(1) or "").strip()
+        if time_part:
+            for time_fmt in ("%I:%M %p", "%I %p"):
+                try:
+                    time_value = datetime.strptime(time_part.upper(), time_fmt)
+                    return base.replace(hour=time_value.hour, minute=time_value.minute, second=0, microsecond=0)
+                except ValueError:
+                    continue
+        return base
+
     formats = [
         "%A, %B %d, %Y at %I:%M %p",
         "%B %d, %Y at %I:%M %p",
         "%B %d at %I:%M %p",
         "%b %d, %Y at %I:%M %p",
+        "%B %d, %Y",
+        "%b %d, %Y",
+        "%B %d",
+        "%b %d",
         "%Y-%m-%d",
     ]
     for fmt in formats:
         try:
             parsed = datetime.strptime(text, fmt)
             if parsed.year == 1900:
-                parsed = parsed.replace(year=datetime.now().year)
+                parsed = parsed.replace(year=now.year)
             return parsed
         except ValueError:
             continue
@@ -559,6 +679,7 @@ def auto_login_if_needed(page, context, target_url: str, log_hook: Optional[LogH
 
     click_button_if_visible(page, r"not now|skip|maybe later")
     page.goto(target_url, wait_until="domcontentloaded", timeout=POST_GOTO_TIMEOUT)
+    apply_local_page_preferences(page)
 
     if page_ready_for_collection(page) and has_authenticated_session(context):
         save_storage_state(context, log_hook)
@@ -591,6 +712,8 @@ def launch_browser(playwright):
             "--disable-setuid-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
+            "--disable-notifications",
+            "--deny-permission-prompts",
             "--no-first-run",
             "--no-default-browser-check",
         ],
@@ -657,7 +780,30 @@ def launch_browser(playwright):
     return browser, context
 
 
-def collect_visible_post_links(page) -> list[str]:
+def apply_local_page_preferences(page) -> None:
+    if not uses_local_browser_window():
+        return
+    try:
+        page.keyboard.press("Control+0")
+        page.wait_for_timeout(60)
+        page.keyboard.press("Control+-")
+        page.wait_for_timeout(60)
+        page.keyboard.press("Control+-")
+    except Exception:
+        try:
+            page.evaluate(
+                """() => {
+                    const targets = [document.documentElement, document.body].filter(Boolean);
+                    for (const node of targets) {
+                        node.style.zoom = '75%';
+                    }
+                }"""
+            )
+        except Exception:
+            return
+
+
+def collect_visible_post_links(page, target_url: str = "") -> list[str]:
     return page.evaluate(
         """() => {
             const selectors = [
@@ -668,14 +814,26 @@ def collect_visible_post_links(page) -> list[str]:
                 "a[href*='/photo.php']",
                 "a[href*='/watch/?v=']",
             ];
-            const seen = new Set();
             const links = [];
-            for (const selector of selectors) {
-                for (const anchor of document.querySelectorAll(selector)) {
-                    const href = (anchor.href || "").split("&__")[0];
-                    if (!href || seen.has(href)) continue;
-                    seen.add(href);
-                    links.push(href);
+            const articleSelectors = [
+                "div[role='feed'] div[role='article']",
+                "div[data-pagelet*='FeedUnit']",
+                "div[aria-posinset]",
+            ];
+            const articleNodes = new Set();
+            for (const selector of articleSelectors) {
+                for (const node of document.querySelectorAll(selector)) {
+                    articleNodes.add(node);
+                }
+            }
+            const roots = articleNodes.size ? Array.from(articleNodes) : [document];
+            for (const root of roots) {
+                for (const selector of selectors) {
+                    for (const anchor of root.querySelectorAll(selector)) {
+                        const href = (anchor.href || "").split("&__")[0];
+                        if (!href) continue;
+                        links.push(href);
+                    }
                 }
             }
             return links;
@@ -746,6 +904,7 @@ def wait_for_scroll_growth(page, previous_state: dict[str, Any], timeout_ms: int
 def collect_post_links(
     page,
     scroll_rounds: int,
+    target_url: str = "",
     log_hook: Optional[LogHook] = None,
     progress_hook: Optional[ProgressHook] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
@@ -757,7 +916,7 @@ def collect_post_links(
     strategies = ("window-scroll", "mouse-wheel", "page-down", "bottom-jump")
     stop_reason = f"Reached max scroll rounds ({scroll_rounds})."
 
-    initial_links = collect_visible_post_links(page)
+    initial_links = dedupe_post_links(collect_visible_post_links(page, target_url=target_url), target_url=target_url)
     for href in initial_links:
         if href and href not in links:
             links[href] = True
@@ -784,7 +943,7 @@ def collect_post_links(
             after_state = wait_for_scroll_growth(page, before_state, SCROLL_WAIT_TIMEOUT)
             height_after = after_state["bodyHeight"]
             anchors_after = after_state["linkCount"]
-            fresh_links = collect_visible_post_links(page)
+            fresh_links = dedupe_post_links(collect_visible_post_links(page, target_url=target_url), target_url=target_url)
             for href in fresh_links:
                 if href and href not in links:
                     links[href] = True
@@ -877,20 +1036,157 @@ def extract_post_date(page) -> tuple[str, Optional[datetime]]:
     return raw_value, parse_facebook_datetime(raw_value)
 
 
-def extract_visible_comments(page, post_url: str, limit: int = 5) -> list[CommentData]:
+def count_visible_comment_nodes(page) -> int:
+    script = """
+        () => {
+            const selectors = [
+                "div[role='article'] ul li",
+                "div[aria-label*='Comment']",
+                "div[role='dialog'] ul li",
+            ];
+            const seen = new Set();
+            for (const selector of selectors) {
+                for (const node of document.querySelectorAll(selector)) {
+                    if (node && node.innerText && node.innerText.trim().length >= 4) {
+                        seen.add(node);
+                    }
+                }
+            }
+            return seen.size;
+        }
+    """
+    try:
+        return int(page.evaluate(script) or 0)
+    except Exception:
+        return 0
+
+
+def expand_visible_comment_threads(page, log_hook: Optional[LogHook] = None, rounds: int = COMMENT_EXPANSION_ROUNDS) -> None:
+    click_script = """
+        () => {
+            const keywords = [
+                "view more comments",
+                "see more comments",
+                "more comments",
+                "view previous comments",
+                "view more replies",
+                "see more replies",
+                "more replies",
+                "view previous replies",
+            ];
+            const nodes = Array.from(document.querySelectorAll("div[role='button'], button, span"));
+            for (const node of nodes) {
+                const text = (node.innerText || node.textContent || "").trim().toLowerCase();
+                if (!text) continue;
+                if (!keywords.some(keyword => text.includes(keyword))) continue;
+                const target = node.closest("div[role='button'], button") || node;
+                if (!target || target.disabled) continue;
+                const rect = target.getBoundingClientRect();
+                if (rect.width < 1 || rect.height < 1) continue;
+                target.scrollIntoView({ block: "center", inline: "nearest" });
+                target.click();
+                return text;
+            }
+            return "";
+        }
+    """
+
+    previous_count = count_visible_comment_nodes(page)
+    for round_index in range(1, rounds + 1):
+        if round_index > 1:
+            try:
+                page.mouse.wheel(0, 900)
+            except Exception:
+                page.evaluate("window.scrollBy(0, 900);")
+        clicked_label = ""
+        try:
+            clicked_label = page.evaluate(click_script) or ""
+        except Exception:
+            clicked_label = ""
+
+        page.wait_for_timeout(COMMENT_LOAD_WAIT_MS)
+        current_count = count_visible_comment_nodes(page)
+        if clicked_label:
+            emit_log(log_hook, "INFO", "Comments expanded", f"Round {round_index}: clicked '{clicked_label}' (visible nodes={current_count}).")
+        elif current_count > previous_count:
+            emit_log(log_hook, "INFO", "Comments expanded", f"Round {round_index}: more visible comments loaded (visible nodes={current_count}).")
+        else:
+            emit_log(log_hook, "INFO", "Comments expanded", f"Round {round_index}: no additional visible comments or replies.")
+
+        if not clicked_label and current_count <= previous_count:
+            previous_count = current_count
+            continue
+        previous_count = current_count
+
+
+def extract_visible_comments(page, post_url: str, limit: int = 25, log_hook: Optional[LogHook] = None) -> list[CommentData]:
+    expand_visible_comment_threads(page, log_hook=log_hook)
     script = """
         (limit) => {
             const results = [];
             const seen = new Set();
-            const candidates = document.querySelectorAll("div[aria-label*='Comment'], div[role='article'] ul li");
+            const selectors = [
+                "div[role='dialog'] ul li",
+                "div[role='article'] ul li",
+                "div[aria-label*='Comment']",
+            ];
+            const candidates = [];
+            for (const selector of selectors) {
+                for (const node of document.querySelectorAll(selector)) {
+                    candidates.push(node);
+                }
+            }
+
+            const datePattern = /(just now|\\d+\\s*(?:s|m|h|d|w)|\\d+\\s+(?:second|minute|hour|day|week|month|year)s?\\s+ago|yesterday|today|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i;
+            const uiTokens = new Set(["like", "reply", "author", "edited", "top fan", "follow", "message"]);
+
             for (const node of candidates) {
                 const text = (node.innerText || '').trim();
                 if (!text || text.length < 8 || seen.has(text)) continue;
-                seen.add(text);
                 const lines = text.split('\\n').map(line => line.trim()).filter(Boolean);
-                const commenter = lines[0] || '';
-                const commentText = lines.slice(1).join(' ').trim() || text;
-                results.push({ commenter, commentText, raw: text });
+                if (!lines.length) continue;
+
+                let commenter = '';
+                const authorCandidate = node.querySelector("strong a, h3 a, a[role='link']");
+                if (authorCandidate) {
+                    commenter = (authorCandidate.textContent || '').trim();
+                }
+                if (!commenter) {
+                    commenter = lines[0] || '';
+                }
+
+                let commentDate = '';
+                const dateNode = node.querySelector("abbr, time, a[aria-label]");
+                if (dateNode) {
+                    commentDate = (
+                        dateNode.getAttribute('aria-label') ||
+                        dateNode.getAttribute('datetime') ||
+                        dateNode.textContent ||
+                        ''
+                    ).trim();
+                }
+                if (!commentDate) {
+                    const lineMatch = lines.find(line => datePattern.test(line));
+                    commentDate = lineMatch || '';
+                }
+
+                const threadType = node.closest('ul ul') ? 'Reply' : 'Comment';
+                const filtered = lines.filter((line, index) => {
+                    const lower = line.toLowerCase();
+                    if (!line) return false;
+                    if (index === 0 && line === commenter) return false;
+                    if (commentDate && line === commentDate) return false;
+                    if (uiTokens.has(lower)) return false;
+                    if (lower.startsWith('view more repl') || lower.startsWith('see more repl')) return false;
+                    if (lower.startsWith('view more comment') || lower.startsWith('see more comment')) return false;
+                    return true;
+                });
+
+                const commentText = filtered.join(' ').trim() || text;
+                const identity = `${threadType}|${commenter}|${commentDate}|${commentText}`;
+                if (!commentText || seen.has(identity)) continue;
+                seen.add(identity);
+                results.push({ commenter, commentText, commentDate, threadType });
                 if (results.length >= limit) break;
             }
             return results;
@@ -912,7 +1208,8 @@ def extract_visible_comments(page, post_url: str, limit: int = 5) -> list[Commen
                 post_url=post_url,
                 commenter_name=commenter or "Unknown",
                 comment_text=comment_text,
-                comment_date_raw="",
+                comment_date_raw=(row.get("commentDate") or "").strip(),
+                thread_type=(row.get("threadType") or "Comment").strip() or "Comment",
             )
         )
     return comments
@@ -964,6 +1261,8 @@ def extract_text_metrics(page) -> tuple[Optional[int], Optional[int], Optional[i
 def open_post_for_extraction(page, url: str, goto_timeout: int = POST_GOTO_TIMEOUT) -> tuple[str, Optional[datetime], str]:
     page.goto(url, wait_until="domcontentloaded", timeout=goto_timeout)
     wait_for_selector(page, "body", 2000)
+    apply_local_page_preferences(page)
+    page.wait_for_timeout(200)
     post_type = infer_post_type(url)
     raw_date, date_obj = extract_post_date(page)
     return raw_date, date_obj, post_type
@@ -989,7 +1288,7 @@ def extract_metrics_from_loaded_post(
 
     comments_preview: list[CommentData] = []
     if collection_type == "posts_with_comments":
-        comments_preview = extract_visible_comments(page, url)
+        comments_preview = extract_visible_comments(page, url, log_hook=log_hook)
         if not comments_preview:
             notes.append("No visible comment samples captured")
 
@@ -1072,13 +1371,14 @@ def save_facebook_excel(posts: list[PostData], filename: str, coverage_label: st
     ws.column_dimensions["G"].width = 44
 
     comments_sheet = wb.create_sheet("Visible Comments")
-    comments_sheet.append(["Post Link", "Commenter", "Comment Date", "Comment Text"])
+    comments_sheet.append(["Post Link", "Thread Type", "Commenter", "Comment Date", "Comment Text"])
     comment_rows = 0
     for post in posts:
         for comment in post.comments_preview:
             comment_rows += 1
             comments_sheet.append([
                 comment.post_url,
+                comment.thread_type,
                 comment.commenter_name,
                 comment.comment_date_raw,
                 comment.comment_text,
@@ -1088,9 +1388,10 @@ def save_facebook_excel(posts: list[PostData], filename: str, coverage_label: st
         comments_sheet["A2"] = "No visible public comment samples were captured for this run."
 
     comments_sheet.column_dimensions["A"].width = 64
-    comments_sheet.column_dimensions["B"].width = 24
-    comments_sheet.column_dimensions["C"].width = 18
-    comments_sheet.column_dimensions["D"].width = 80
+    comments_sheet.column_dimensions["B"].width = 14
+    comments_sheet.column_dimensions["C"].width = 24
+    comments_sheet.column_dimensions["D"].width = 18
+    comments_sheet.column_dimensions["E"].width = 80
 
     wb.save(filename)
 

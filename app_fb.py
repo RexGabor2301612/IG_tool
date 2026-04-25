@@ -187,11 +187,9 @@ class ScrapeJobState:
 
     def snapshot(self, include_logs: bool = True) -> dict[str, Any]:
         with self.lock:
-            eligible_total = self.posts_in_range if self.posts_in_range > 0 else (self.posts_success + self.failed_extractions)
+            eligible_total = self.posts_in_range + self.failed_extractions
             if eligible_total > 0:
                 success_rate = round(100 * self.posts_success / eligible_total)
-            elif self.posts_checked > 0 and self.failed_extractions == 0:
-                success_rate = 100
             else:
                 success_rate = 0
 
@@ -639,6 +637,7 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
             try:
                 JOB.add_log("INFO", "Login session detected", "Login gate cleared. Returning to the requested Facebook target in the same browser tab.")
                 page.goto(target_url, wait_until="domcontentloaded", timeout=scraper.POST_GOTO_TIMEOUT)
+                scraper.apply_local_page_preferences(page)
                 sync_browser_url(page, target_url)
                 returned_to_target = True
                 continue
@@ -703,6 +702,7 @@ def collect_post_links_with_progress(page, config: WebScrapeConfig) -> list[str]
     links = scraper.collect_post_links(
         page,
         scroll_rounds=config.scroll_rounds,
+        target_url=config.target_url,
         log_hook=JOB.add_log,
         progress_hook=progress_hook,
         cancel_check=JOB.should_cancel,
@@ -735,6 +735,7 @@ def wait_until_page_ready_or_login_completed(page, context, target_url: str) -> 
     JOB.add_log("INFO", "Browser opened", "Opened the Facebook browser session.")
     JOB.add_log("INFO", "Opened target", target_url)
     page.goto(target_url, wait_until="domcontentloaded", timeout=scraper.POST_GOTO_TIMEOUT)
+    scraper.apply_local_page_preferences(page)
     sync_browser_url(page, target_url)
     JOB.add_log("INFO", "Checking login state", "Checking whether Facebook requires login before extraction.")
 
