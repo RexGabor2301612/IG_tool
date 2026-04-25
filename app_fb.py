@@ -879,6 +879,7 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
             profile_path = scraper.get_user_data_dir()
             if profile_path is not None:
                 JOB.add_log("INFO", "Using persistent browser profile", str(profile_path))
+            JOB.add_log("INFO", "Browser engine", scraper.browser_engine_label())
             if using_local_browser_window():
                 try:
                     page.bring_to_front()

@@ -42,6 +42,11 @@ PLAYWRIGHT_INTERACTIVE_BROWSER = os.getenv(
     "PLAYWRIGHT_INTERACTIVE_BROWSER",
     "true" if (HAS_LOCAL_DESKTOP and not RUNNING_ON_RENDER) else "false",
 ).strip().lower() in {"1", "true", "yes", "on"}
+PLAYWRIGHT_BROWSER_CHANNEL = os.getenv(
+    "PLAYWRIGHT_BROWSER_CHANNEL",
+    "chrome" if (HAS_LOCAL_DESKTOP and not RUNNING_ON_RENDER) else "",
+).strip().lower()
+ACTIVE_BROWSER_ENGINE = "chromium"
 
 # -----------------------------------------------------------------------------
 # Facebook login credentials
@@ -135,9 +140,22 @@ def browser_mode_label() -> str:
     return "Opened Browser Window" if uses_local_browser_window() else "Headless Browser Session"
 
 
+def browser_engine_label() -> str:
+    engine = (ACTIVE_BROWSER_ENGINE or "chromium").strip().lower()
+    if engine == "chrome":
+        return "Google Chrome"
+    if engine == "msedge":
+        return "Microsoft Edge"
+    return "Chromium"
+
+
 def browser_mode_note() -> str:
     if uses_local_browser_window():
-        return "A real Chromium window opens locally for Facebook login and verification using a persistent local browser profile. Keep that browser open, avoid refreshing the page, and click GO only after the target page is visible."
+        return (
+            f"A real {browser_engine_label()} window opens locally for Facebook login and verification "
+            "using a persistent local browser profile. Keep that browser open, avoid refreshing the page, "
+            "and click GO only after the target page is visible."
+        )
     return "This environment cannot open a local Chromium window. Manual Facebook login requires a local run with PLAYWRIGHT_INTERACTIVE_BROWSER=true."
 
 
@@ -526,6 +544,7 @@ def install_playwright_browsers() -> None:
 
 
 def launch_browser(playwright):
+    global ACTIVE_BROWSER_ENGINE
     headless = False if uses_local_browser_window() else PLAYWRIGHT_HEADLESS
     launch_options = {
         "headless": headless,
@@ -549,25 +568,44 @@ def launch_browser(playwright):
             "locale": "en-US",
             "args": launch_options["args"],
         }
+        if PLAYWRIGHT_BROWSER_CHANNEL:
+            persistent_options["channel"] = PLAYWRIGHT_BROWSER_CHANNEL
         try:
             context = playwright.chromium.launch_persistent_context(
                 user_data_dir=str(user_data_dir),
                 **persistent_options,
             )
+            ACTIVE_BROWSER_ENGINE = PLAYWRIGHT_BROWSER_CHANNEL or "chromium"
         except PlaywrightError as exc:
             message = str(exc)
             missing_browser = "Executable doesn't exist" in message or "Please run the following command" in message
+            if PLAYWRIGHT_BROWSER_CHANNEL:
+                fallback_options = dict(persistent_options)
+                fallback_options.pop("channel", None)
+                try:
+                    context = playwright.chromium.launch_persistent_context(
+                        user_data_dir=str(user_data_dir),
+                        **fallback_options,
+                    )
+                    ACTIVE_BROWSER_ENGINE = "chromium"
+                    return None, context
+                except PlaywrightError:
+                    pass
             if not (PLAYWRIGHT_AUTO_INSTALL and missing_browser):
                 raise
             install_playwright_browsers()
+            fallback_options = dict(persistent_options)
+            fallback_options.pop("channel", None)
             context = playwright.chromium.launch_persistent_context(
                 user_data_dir=str(user_data_dir),
-                **persistent_options,
+                **fallback_options,
             )
+            ACTIVE_BROWSER_ENGINE = "chromium"
         return None, context
 
     try:
         browser = playwright.chromium.launch(**launch_options)
+        ACTIVE_BROWSER_ENGINE = "chromium"
     except PlaywrightError as exc:
         message = str(exc)
         missing_browser = "Executable doesn't exist" in message or "Please run the following command" in message
@@ -575,6 +613,7 @@ def launch_browser(playwright):
             raise
         install_playwright_browsers()
         browser = playwright.chromium.launch(**launch_options)
+        ACTIVE_BROWSER_ENGINE = "chromium"
 
     context, _ = load_or_create_context(browser)
     return browser, context
