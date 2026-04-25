@@ -546,15 +546,21 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
             )
             if not verification_logged:
                 JOB.add_log("WARN", "Verification required", checkpoint_reason)
+                if "captcha" in checkpoint_reason.lower() or "recaptcha" in checkpoint_reason.lower():
+                    JOB.add_log("WARN", "reCAPTCHA detected", "Facebook is requiring a manual reCAPTCHA/security check before the page can be used.")
                 JOB.add_log("WARN", "Waiting for user to complete verification", "Facebook verification required. Please complete it manually in the opened browser.")
+                JOB.add_log("INFO", "Do not refresh or close browser", "Keep the same Chromium window open and let Facebook finish the verification flow.")
                 broadcast_dashboard_event(
                     "verification_required",
-                    {"message": "Facebook verification required. Please complete it manually in the opened browser.", "url": current_page_url(page, target_url)},
+                    {
+                        "message": "Facebook verification required. Complete it manually in the opened browser and do not refresh or close the window.",
+                        "url": current_page_url(page, target_url),
+                    },
                 )
                 verification_logged = True
                 last_verification_ping = time.monotonic()
             elif time.monotonic() - last_verification_ping >= 10:
-                JOB.add_log("INFO", "Still waiting for verification", "Facebook verification is still active. Complete it manually in the opened browser.")
+                JOB.add_log("INFO", "Verification still pending", "Facebook verification is still active. Complete it manually in the opened browser and keep the same tab open.")
                 last_verification_ping = time.monotonic()
             if verification_deadline is not None and time.monotonic() >= verification_deadline:
                 raise TimeoutError("Facebook verification did not complete before timeout. Please try again after completing the checkpoint manually.")

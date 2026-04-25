@@ -136,7 +136,7 @@ def browser_mode_label() -> str:
 
 def browser_mode_note() -> str:
     if uses_local_browser_window():
-        return "A real Chromium window opens locally for Facebook login. Use the dashboard to monitor readiness, then click GO."
+        return "A real Chromium window opens locally for Facebook login and verification. Keep that browser open, avoid refreshing the page, and click GO only after the target page is visible."
     return "This environment cannot open a local Chromium window. Manual Facebook login requires a local run with PLAYWRIGHT_INTERACTIVE_BROWSER=true."
 
 
@@ -173,11 +173,6 @@ def load_or_create_context(browser):
     context_options = {
         "viewport": {"width": 1440, "height": 960},
         "locale": "en-US",
-        "user_agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/126.0.0.0 Safari/537.36"
-        ),
     }
     storage_path = get_storage_state_path(require_exists=True)
     if storage_path is not None:

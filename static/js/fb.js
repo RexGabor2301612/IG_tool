@@ -235,7 +235,7 @@ document.addEventListener("DOMContentLoaded", function () {
             browserSessionStatusText.textContent = "Browser session created. Opening Facebook target.";
         } else if (data.status === "waiting_verification" || data.verificationRequired) {
             browserSessionStatusText.textContent = data.localBrowserWindow
-                ? "Verification required. Complete it manually in Chromium."
+                ? "Verification required. Complete it manually in Chromium and do not refresh or close the browser."
                 : "Facebook verification required, but this environment has no local browser window.";
         } else if (data.status === "waiting_login") {
             browserSessionStatusText.textContent = data.localBrowserWindow
@@ -264,7 +264,7 @@ document.addEventListener("DOMContentLoaded", function () {
         } else if (data.status === "preparing") {
             goStatusText.textContent = "Preparing browser session.";
         } else if (data.status === "waiting_verification" || data.verificationRequired) {
-            goStatusText.textContent = "Complete Facebook verification first.";
+            goStatusText.textContent = "Complete Facebook verification first. Do not refresh or close Chromium.";
         } else if (data.status === "waiting_login") {
             goStatusText.textContent = "Waiting for Facebook login.";
         } else if (data.status === "ready") {
