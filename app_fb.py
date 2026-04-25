@@ -845,6 +845,11 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
             f"collectionType={config.collection_type}"
         ),
     )
+    JOB.add_log(
+        "INFO",
+        "Selected collection type",
+        "Posts with visible comments" if config.collection_type == "posts_with_comments" else "Posts only",
+    )
 
     browser = None
     context = None
@@ -936,7 +941,11 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
 
                 try:
                     started = time.perf_counter()
-                    raw_date, date_obj, post_type = scraper.open_post_for_extraction(page, link)
+                    raw_date, date_obj, post_type, scope_snapshot = scraper.open_post_for_extraction(
+                        page,
+                        link,
+                        log_hook=JOB.add_log,
+                    )
                     detected_date_text = date_obj.strftime(scraper.DATE_INPUT_FORMAT) if date_obj else (raw_date or "Cannot detect")
                     JOB.add_log("INFO", "Post date detected", f"{link} -> {detected_date_text}")
 
@@ -992,6 +1001,7 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                         post_type,
                         config.collection_type,
                         log_hook=JOB.add_log,
+                        scope_snapshot=scope_snapshot,
                     )
                     all_posts.append(post)
                     snapshot = JOB.snapshot()

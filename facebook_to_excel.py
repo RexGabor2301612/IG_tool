@@ -67,13 +67,13 @@ LOGIN_FORM_TIMEOUT = 12000
 LOGIN_READY_TIMEOUT = 180000
 LOGIN_POST_SUBMIT_TIMEOUT = 15000
 PAGE_READY_TIMEOUT = 12000
-SCROLL_WAIT_TIMEOUT = 1800
+SCROLL_WAIT_TIMEOUT = 2200
 PROFILE_RETRY_MS = 800
 BASE_POST_DELAY = 0.15
 SLOW_SCROLL_SECONDS = 2.0
 SLOW_POST_SECONDS = 4.0
-COMMENT_LOAD_WAIT_MS = 650
-COMMENT_EXPANSION_ROUNDS = 4
+COMMENT_LOAD_WAIT_MS = 900
+COMMENT_EXPANSION_ROUNDS = 8
 
 POST_LINK_SELECTOR = (
     "a[href*='/posts/'], "
@@ -135,6 +135,29 @@ def emit_progress(progress_hook: Optional[ProgressHook], scroll_round: int, tota
         return
     try:
         progress_hook(scroll_round, total_rounds, posts_found)
+    except Exception:
+        pass
+
+
+def apply_context_preferences(context) -> None:
+    try:
+        context.add_init_script(
+            """() => {
+                try {
+                    if (window.Notification) {
+                        try {
+                            Object.defineProperty(Notification, 'permission', {
+                                configurable: true,
+                                get: () => 'denied',
+                            });
+                        } catch (error) {}
+                        try {
+                            Notification.requestPermission = () => Promise.resolve('denied');
+                        } catch (error) {}
+                    }
+                } catch (error) {}
+            }"""
+        )
     except Exception:
         pass
 
@@ -214,6 +237,7 @@ def load_or_create_context(browser):
     if storage_path is not None:
         context_options["storage_state"] = str(storage_path)
     context = browser.new_context(**context_options)
+    apply_context_preferences(context)
     return context, storage_path
 
 
@@ -714,6 +738,7 @@ def launch_browser(playwright):
             "--disable-gpu",
             "--disable-notifications",
             "--deny-permission-prompts",
+            "--disable-features=NotificationTriggers,PermissionsPromptService,PushMessaging",
             "--no-first-run",
             "--no-default-browser-check",
         ],
@@ -736,6 +761,7 @@ def launch_browser(playwright):
                 user_data_dir=str(user_data_dir),
                 **persistent_options,
             )
+            apply_context_preferences(context)
             ACTIVE_BROWSER_ENGINE = PLAYWRIGHT_BROWSER_CHANNEL or "chromium"
         except PlaywrightError as exc:
             message = str(exc)
@@ -748,6 +774,7 @@ def launch_browser(playwright):
                         user_data_dir=str(user_data_dir),
                         **fallback_options,
                     )
+                    apply_context_preferences(context)
                     ACTIVE_BROWSER_ENGINE = "chromium"
                     return None, context
                 except PlaywrightError:
@@ -761,6 +788,7 @@ def launch_browser(playwright):
                 user_data_dir=str(user_data_dir),
                 **fallback_options,
             )
+            apply_context_preferences(context)
             ACTIVE_BROWSER_ENGINE = "chromium"
         return None, context
 
@@ -803,9 +831,67 @@ def apply_local_page_preferences(page) -> None:
             return
 
 
+def focus_posts_section(page, log_hook: Optional[LogHook] = None) -> None:
+    script = """
+        () => {
+            const isVisible = (node) => {
+                if (!node) return false;
+                const style = window.getComputedStyle(node);
+                if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+                const rect = node.getBoundingClientRect();
+                return rect.width > 8 && rect.height > 8;
+            };
+
+            const candidates = Array.from(document.querySelectorAll("h1, h2, h3, span, div"));
+            for (const node of candidates) {
+                const text = (node.textContent || '').trim().toLowerCase();
+                if (text !== 'posts') continue;
+                if (!isVisible(node)) continue;
+                node.scrollIntoView({ block: 'start', inline: 'nearest' });
+                return true;
+            }
+            return false;
+        }
+    """
+    try:
+        moved = bool(page.evaluate(script))
+        if moved:
+            page.wait_for_timeout(250)
+            emit_log(log_hook, "INFO", "Posts section", "Scrolled the Facebook page to the posts section before collecting links.")
+    except Exception:
+        return
+
+
 def collect_visible_post_links(page, target_url: str = "") -> list[str]:
     return page.evaluate(
-        """() => {
+        """(targetUrl) => {
+            const normalizeHref = (value) => {
+                if (!value) return '';
+                try {
+                    const url = new URL(value, window.location.origin);
+                    for (const key of ['comment_id', 'reply_comment_id', '__tn__', '__cft__', 'ref', 'refsrc', 'notif_t', 'comment_tracking', 'acontext']) {
+                        url.searchParams.delete(key);
+                    }
+                    return `${url.origin}${url.pathname}${url.search}`;
+                } catch (error) {
+                    return String(value || '').split('&__')[0];
+                }
+            };
+            const isVisible = (node) => {
+                if (!node) return false;
+                const style = window.getComputedStyle(node);
+                if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+                const rect = node.getBoundingClientRect();
+                return rect.width > 8 && rect.height > 8;
+            };
+            const target = normalizeHref(targetUrl);
+            let targetSlug = '';
+            try {
+                if (target) {
+                    const parsed = new URL(target);
+                    targetSlug = (parsed.pathname || '').split('/').filter(Boolean)[0] || '';
+                }
+            } catch (error) {}
             const selectors = [
                 "a[href*='/posts/']",
                 "a[href*='/videos/']",
@@ -816,6 +902,7 @@ def collect_visible_post_links(page, target_url: str = "") -> list[str]:
             ];
             const links = [];
             const articleSelectors = [
+                "div[role='main'] div[role='article']",
                 "div[role='feed'] div[role='article']",
                 "div[data-pagelet*='FeedUnit']",
                 "div[aria-posinset]",
@@ -823,21 +910,43 @@ def collect_visible_post_links(page, target_url: str = "") -> list[str]:
             const articleNodes = new Set();
             for (const selector of articleSelectors) {
                 for (const node of document.querySelectorAll(selector)) {
+                    if (!isVisible(node)) continue;
+                    const text = (node.innerText || '').trim().toLowerCase();
+                    if (!text) continue;
+                    if (
+                        text.includes('people you may know') ||
+                        text.includes('suggested for you') ||
+                        text.includes('sponsored')
+                    ) continue;
+                    const inFeatured = Boolean(
+                        node.closest("[aria-label='Featured'], [data-pagelet*='Featured'], section, div")
+                        && /featured/i.test(node.closest("section, div")?.innerText || '')
+                    );
+                    if (inFeatured) continue;
+                    if (targetSlug) {
+                        const rootLinks = Array.from(node.querySelectorAll("a[href]"))
+                            .map((anchor) => normalizeHref(anchor.href))
+                            .filter(Boolean);
+                        const hasTargetSlug = rootLinks.some((href) => href.includes(`/${targetSlug}/`));
+                        if (!hasTargetSlug) continue;
+                    }
                     articleNodes.add(node);
                 }
             }
-            const roots = articleNodes.size ? Array.from(articleNodes) : [document];
+            const roots = articleNodes.size ? Array.from(articleNodes) : [document.querySelector("div[role='main']") || document];
             for (const root of roots) {
                 for (const selector of selectors) {
                     for (const anchor of root.querySelectorAll(selector)) {
-                        const href = (anchor.href || "").split("&__")[0];
+                        const href = normalizeHref(anchor.href || "");
                         if (!href) continue;
+                        if (targetSlug && !href.includes(`/${targetSlug}/`) && !href.includes('story_fbid=')) continue;
                         links.push(href);
                     }
                 }
             }
             return links;
-        }"""
+        }""",
+        arg=target_url,
     )
 
 
@@ -848,6 +957,7 @@ def get_scroll_state(page) -> dict[str, Any]:
             const anchors = new Set(
                 Array.from(document.querySelectorAll("a[href*='/posts/'], a[href*='/videos/'], a[href*='/permalink/'], a[href*='story_fbid='], a[href*='/photo.php'], a[href*='/watch/?v=']")).map(a => (a.href || '').split('&__')[0]).filter(Boolean)
             );
+            const articleCount = document.querySelectorAll("div[role='main'] div[role='article'], div[role='feed'] div[role='article'], div[data-pagelet*='FeedUnit'], div[aria-posinset]").length;
             const bodyHeight = Math.max(
                 Number(doc.scrollHeight || 0),
                 Number(document.body ? document.body.scrollHeight : 0),
@@ -857,6 +967,7 @@ def get_scroll_state(page) -> dict[str, Any]:
             const viewport = Number(window.innerHeight || doc.clientHeight || 0);
             return {
                 linkCount: anchors.size,
+                articleCount,
                 scrollTop: top,
                 scrollHeight: bodyHeight,
                 bodyHeight,
@@ -885,13 +996,14 @@ def wait_for_scroll_growth(page, previous_state: dict[str, Any], timeout_ms: int
                 const anchors = new Set(
                     Array.from(document.querySelectorAll("a[href*='/posts/'], a[href*='/videos/'], a[href*='/permalink/'], a[href*='story_fbid='], a[href*='/photo.php'], a[href*='/watch/?v=']")).map(a => (a.href || '').split('&__')[0]).filter(Boolean)
                 );
+                const articleCount = document.querySelectorAll("div[role='main'] div[role='article'], div[role='feed'] div[role='article'], div[data-pagelet*='FeedUnit'], div[aria-posinset]").length;
                 const bodyHeight = Math.max(
                     Number(doc.scrollHeight || 0),
                     Number(document.body ? document.body.scrollHeight : 0),
                     Number(document.documentElement ? document.documentElement.scrollHeight : 0)
                 );
                 const top = Number(doc.scrollTop || window.pageYOffset || 0);
-                return anchors.size > prev.linkCount || bodyHeight > prev.bodyHeight + 24 || top > prev.scrollTop + 24;
+                return anchors.size > prev.linkCount || articleCount > prev.articleCount || bodyHeight > prev.bodyHeight + 24 || top > prev.scrollTop + 24;
             }""",
             arg=previous_state,
             timeout=timeout_ms,
@@ -916,6 +1028,8 @@ def collect_post_links(
     strategies = ("window-scroll", "mouse-wheel", "page-down", "bottom-jump")
     stop_reason = f"Reached max scroll rounds ({scroll_rounds})."
 
+    focus_posts_section(page, log_hook=log_hook)
+
     initial_links = dedupe_post_links(collect_visible_post_links(page, target_url=target_url), target_url=target_url)
     for href in initial_links:
         if href and href not in links:
@@ -935,6 +1049,7 @@ def collect_post_links(
         height_before = before_state["bodyHeight"]
         height_after = height_before
         anchors_after = before_state["linkCount"]
+        article_count_after = before_state.get("articleCount", 0)
 
         for strategy in strategies:
             strategy_used = strategy
@@ -943,21 +1058,29 @@ def collect_post_links(
             after_state = wait_for_scroll_growth(page, before_state, SCROLL_WAIT_TIMEOUT)
             height_after = after_state["bodyHeight"]
             anchors_after = after_state["linkCount"]
+            article_count_after = after_state.get("articleCount", before_state.get("articleCount", 0))
             fresh_links = dedupe_post_links(collect_visible_post_links(page, target_url=target_url), target_url=target_url)
             for href in fresh_links:
                 if href and href not in links:
                     links[href] = True
-            if len(links) > before_count or after_state["bodyHeight"] > before_state["bodyHeight"] + 24 or after_state["scrollTop"] > before_state["scrollTop"] + 24:
+            if (
+                len(links) > before_count
+                or after_state.get("articleCount", 0) > before_state.get("articleCount", 0)
+                or after_state["bodyHeight"] > before_state["bodyHeight"] + 24
+                or after_state["scrollTop"] > before_state["scrollTop"] + 24
+            ):
                 break
             page.wait_for_timeout(PROFILE_RETRY_MS)
 
         new_links = len(links) - before_count
+        article_growth = max(0, article_count_after - before_state.get("articleCount", 0))
         elapsed = time.perf_counter() - round_start
-        if new_links == 0:
+        if new_links == 0 and article_growth == 0:
             stagnant_rounds += 1
             detail = (
                 f"+0 new links (total={len(links)}, strategy={strategy_used}, "
                 f"height={height_before}->{height_after}, anchors={before_state['linkCount']}->{anchors_after}, "
+                f"articles={before_state.get('articleCount', 0)}->{article_count_after}, "
                 f"stagnant={stagnant_rounds}/{stagnant_limit})"
             )
             if before_state["atBottom"]:
@@ -965,13 +1088,17 @@ def collect_post_links(
             emit_log(log_hook, "INFO", f"Scroll {round_index}", detail)
         else:
             stagnant_rounds = 0
+            detail_suffix = f"+{new_links} new links" if new_links > 0 else "+0 new links"
+            if article_growth > 0:
+                detail_suffix += f", +{article_growth} new post containers"
             emit_log(
                 log_hook,
                 "INFO",
                 f"Scroll {round_index}",
                 (
-                    f"+{new_links} new links (total={len(links)}, strategy={strategy_used}, "
-                    f"height={height_before}->{height_after}, anchors={before_state['linkCount']}->{anchors_after})"
+                    f"{detail_suffix} (total={len(links)}, strategy={strategy_used}, "
+                    f"height={height_before}->{height_after}, anchors={before_state['linkCount']}->{anchors_after}, "
+                    f"articles={before_state.get('articleCount', 0)}->{article_count_after})"
                 ),
             )
 
@@ -1003,147 +1130,673 @@ def infer_post_type(url: str) -> str:
     return "Post"
 
 
-def extract_post_date(page) -> tuple[str, Optional[datetime]]:
+def summarize_log_text(text: str, limit: int = 120) -> str:
+    compact = re.sub(r"\s+", " ", text or "").strip()
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[:limit - 3]}..."
+
+
+def inspect_active_post_scope(page, target_url: str = "") -> dict[str, Any]:
     script = """
-        () => {
-            const selectors = [
-                "abbr",
-                "time",
-                "a[aria-label][href*='/posts/']",
-                "a[aria-label][href*='story_fbid=']",
-                "a[aria-label][href*='/videos/']",
-            ];
-            for (const selector of selectors) {
-                const el = document.querySelector(selector);
-                if (!el) continue;
-                const candidates = [
-                    el.getAttribute('aria-label') || '',
-                    el.getAttribute('data-utime') || '',
-                    el.getAttribute('data-tooltip-content') || '',
-                    el.getAttribute('datetime') || '',
-                    (el.textContent || '').trim(),
-                ].filter(Boolean);
-                if (candidates.length) return candidates[0];
+        (targetUrl) => {
+            const normalizeHref = (value) => {
+                if (!value) return '';
+                try {
+                    const url = new URL(value, window.location.origin);
+                    for (const key of ['comment_id', 'reply_comment_id', '__tn__', '__cft__', 'ref', 'refsrc', 'notif_t', 'comment_tracking', 'acontext']) {
+                        url.searchParams.delete(key);
+                    }
+                    return `${url.origin}${url.pathname}${url.search}`;
+                } catch (error) {
+                    return String(value || '').split('&__')[0];
+                }
+            };
+
+            const isVisible = (node) => {
+                if (!node) return false;
+                const style = window.getComputedStyle(node);
+                if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+                const rect = node.getBoundingClientRect();
+                return rect.width > 8 && rect.height > 8;
+            };
+
+            const target = normalizeHref(targetUrl);
+            let targetPath = '';
+            let targetSlug = '';
+            try {
+                if (target) {
+                    const parsed = new URL(target);
+                    targetPath = `${parsed.pathname}${parsed.search}`;
+                    targetSlug = (parsed.pathname || '').split('/').filter(Boolean)[0] || '';
+                }
+            } catch (error) {}
+
+            const candidates = [];
+            const addCandidate = (node, type, baseScore) => {
+                if (!node || !isVisible(node)) return;
+                const text = (node.innerText || '').trim();
+                if (!text) return;
+                candidates.push({ node, type, baseScore, text });
+            };
+
+            for (const dialog of document.querySelectorAll("div[role='dialog']")) {
+                addCandidate(dialog, 'dialog', 120);
             }
-            return '';
-        }
-    """
-    raw_value = ""
-    try:
-        raw_value = page.evaluate(script) or ""
-    except Exception:
-        raw_value = ""
-    return raw_value, parse_facebook_datetime(raw_value)
 
-
-def count_visible_comment_nodes(page) -> int:
-    script = """
-        () => {
-            const selectors = [
-                "div[role='article'] ul li",
-                "div[aria-label*='Comment']",
-                "div[role='dialog'] ul li",
+            const articleSelectors = [
+                "div[role='main'] div[role='article']",
+                "div[role='feed'] div[role='article']",
+                "div[data-pagelet*='FeedUnit']",
+                "div[aria-posinset]",
             ];
-            const seen = new Set();
-            for (const selector of selectors) {
-                for (const node of document.querySelectorAll(selector)) {
-                    if (node && node.innerText && node.innerText.trim().length >= 4) {
-                        seen.add(node);
+            for (const selector of articleSelectors) {
+                for (const article of document.querySelectorAll(selector)) {
+                    addCandidate(article, 'article', 30);
+                }
+            }
+
+            if (!candidates.length) {
+                const main = document.querySelector("div[role='main']");
+                addCandidate(main, 'main', 10);
+            }
+
+            let best = null;
+            for (const candidate of candidates) {
+                const { node, type, baseScore, text } = candidate;
+                const links = Array.from(node.querySelectorAll("a[href]"))
+                    .map((anchor) => normalizeHref(anchor.href))
+                    .filter(Boolean);
+                const matchedTarget = Boolean(
+                    target &&
+                    links.some((href) => href === target || (targetPath && href.includes(targetPath)))
+                );
+                const matchedSlug = Boolean(
+                    targetSlug &&
+                    links.some((href) => href.includes(`/${targetSlug}/`) || href.includes(`/${targetSlug}?`))
+                );
+                let score = baseScore;
+                if (matchedTarget) score += 160;
+                if (matchedSlug) score += 45;
+                if (node.querySelector("abbr, time")) score += 35;
+                if (links.length) score += 10;
+                if (/(reactions?|comments?|shares?|likes?)/i.test(text)) score += 18;
+                if (/featured/i.test(text) && !matchedTarget) score -= 120;
+                if (/people you may know|suggested for you|sponsored/i.test(text)) score -= 180;
+                score += Math.min(30, Math.floor(text.length / 160));
+                if (!best || score > best.score) {
+                    best = { node, type, text, matchedTarget, matchedSlug, score };
+                }
+            }
+
+            if (!best) {
+                return {
+                    found: false,
+                    scopeType: '',
+                    matchedTarget: false,
+                    matchedSlug: false,
+                    scopeText: '',
+                    metricTexts: [],
+                    actionTexts: [],
+                    dateCandidates: [],
+                    preview: '',
+                };
+            }
+
+            const root = best.node;
+            const rootText = (root.innerText || '').replace(/\\s+/g, ' ').trim();
+            const metricTexts = [];
+            const seenMetricTexts = new Set();
+            const actionTexts = [];
+            const seenActionTexts = new Set();
+            const metricSelectors = [
+                "[aria-label]",
+                "[title]",
+                "div[role='button']",
+                "button",
+                "a[href]",
+                "a[role='link']",
+                "span",
+                "div",
+            ];
+            for (const selector of metricSelectors) {
+                for (const node of root.querySelectorAll(selector)) {
+                    if (!isVisible(node)) continue;
+                    const rawParts = [
+                        node.getAttribute('aria-label') || '',
+                        node.getAttribute('title') || '',
+                        (node.textContent || '').trim(),
+                    ].filter(Boolean);
+                    for (const rawPart of rawParts) {
+                        const cleaned = rawPart.replace(/\\s+/g, ' ').trim();
+                        if (!cleaned || cleaned.length > 160 || seenMetricTexts.has(cleaned)) continue;
+                        if (/[0-9]/.test(cleaned) || /(reaction|like|comment|share)/i.test(cleaned)) {
+                            seenMetricTexts.add(cleaned);
+                            metricTexts.push(cleaned);
+                        }
                     }
                 }
             }
-            return seen.size;
+
+            const actionSelectors = [
+                "a[href*='comment_id=']",
+                "a[href*='/ufi/reaction/profile/browser/']",
+                "a[href]",
+                "div[role='button']",
+                "button",
+                "span[role='button']",
+            ];
+            for (const selector of actionSelectors) {
+                for (const node of root.querySelectorAll(selector)) {
+                    if (!isVisible(node)) continue;
+                    const cleaned = [
+                        node.getAttribute('aria-label') || '',
+                        node.getAttribute('title') || '',
+                        node.textContent || '',
+                    ].join(' ').replace(/\\s+/g, ' ').trim();
+                    if (!cleaned || cleaned.length > 120) continue;
+                    if (!(/[0-9]/.test(cleaned) && /(comment|share|reaction|like|reply)/i.test(cleaned))) continue;
+                    if (seenActionTexts.has(cleaned)) continue;
+                    seenActionTexts.add(cleaned);
+                    actionTexts.push(cleaned);
+                }
+            }
+
+            const dateCandidates = [];
+            const seenDates = new Set();
+            const addDate = (value) => {
+                const cleaned = (value || '').trim();
+                if (!cleaned || seenDates.has(cleaned)) return;
+                seenDates.add(cleaned);
+                dateCandidates.push(cleaned);
+            };
+            for (const node of root.querySelectorAll("abbr, time, a[aria-label], span[aria-label]")) {
+                addDate(node.getAttribute('aria-label'));
+                addDate(node.getAttribute('datetime'));
+                addDate(node.getAttribute('data-tooltip-content'));
+                addDate(node.textContent);
+            }
+
+            return {
+                found: true,
+                scopeType: best.type,
+                matchedTarget: best.matchedTarget,
+                matchedSlug: best.matchedSlug,
+                scopeText: rootText,
+                metricTexts,
+                actionTexts,
+                dateCandidates,
+                preview: rootText.slice(0, 240),
+            };
         }
     """
     try:
-        return int(page.evaluate(script) or 0)
+        return page.evaluate(script, arg=target_url) or {}
+    except Exception:
+        return {
+            "found": False,
+            "scopeType": "",
+            "matchedTarget": False,
+            "matchedSlug": False,
+            "scopeText": "",
+            "metricTexts": [],
+            "actionTexts": [],
+            "dateCandidates": [],
+            "preview": "",
+        }
+
+
+def extract_post_date_from_snapshot(scope_snapshot: dict[str, Any]) -> tuple[str, Optional[datetime]]:
+    for candidate in scope_snapshot.get("dateCandidates") or []:
+        parsed = parse_facebook_datetime(candidate)
+        if parsed is not None:
+            return candidate, parsed
+    return "", None
+
+
+def focus_target_post(page, target_url: str, log_hook: Optional[LogHook] = None) -> None:
+    script = """
+        (targetUrl) => {
+            const normalizeHref = (value) => {
+                if (!value) return '';
+                try {
+                    const url = new URL(value, window.location.origin);
+                    for (const key of ['comment_id', 'reply_comment_id', '__tn__', '__cft__', 'ref', 'refsrc', 'notif_t', 'comment_tracking', 'acontext']) {
+                        url.searchParams.delete(key);
+                    }
+                    return `${url.origin}${url.pathname}${url.search}`;
+                } catch (error) {
+                    return String(value || '').split('&__')[0];
+                }
+            };
+            const isVisible = (node) => {
+                if (!node) return false;
+                const style = window.getComputedStyle(node);
+                if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+                const rect = node.getBoundingClientRect();
+                return rect.width > 8 && rect.height > 8;
+            };
+            const target = normalizeHref(targetUrl);
+            let targetPath = '';
+            try {
+                if (target) {
+                    const parsed = new URL(target);
+                    targetPath = `${parsed.pathname}${parsed.search}`;
+                }
+            } catch (error) {}
+            const roots = Array.from(document.querySelectorAll("div[role='dialog'], div[role='main'] div[role='article'], div[role='feed'] div[role='article'], div[data-pagelet*='FeedUnit']"));
+            for (const root of roots) {
+                if (!isVisible(root)) continue;
+                const links = Array.from(root.querySelectorAll("a[href]"))
+                    .map((anchor) => normalizeHref(anchor.href))
+                    .filter(Boolean);
+                const matched = Boolean(target && links.some((href) => href === target || (targetPath && href.includes(targetPath))));
+                if (!matched) continue;
+                root.scrollIntoView({ block: 'center', inline: 'nearest' });
+                return true;
+            }
+            return false;
+        }
+    """
+    try:
+        focused = bool(page.evaluate(script, arg=target_url))
+        if focused:
+            page.wait_for_timeout(300)
+            emit_log(log_hook, "INFO", "Active post focused", "Scrolled the target Facebook post into view before extraction.")
+    except Exception:
+        return
+
+
+def activate_target_post_surface(page, target_url: str, log_hook: Optional[LogHook] = None) -> bool:
+    script = """
+        (targetUrl) => {
+            const normalizeHref = (value) => {
+                if (!value) return '';
+                try {
+                    const url = new URL(value, window.location.origin);
+                    for (const key of ['comment_id', 'reply_comment_id', '__tn__', '__cft__', 'ref', 'refsrc', 'notif_t', 'comment_tracking', 'acontext']) {
+                        url.searchParams.delete(key);
+                    }
+                    return `${url.origin}${url.pathname}${url.search}`;
+                } catch (error) {
+                    return String(value || '').split('&__')[0];
+                }
+            };
+            const isVisible = (node) => {
+                if (!node) return false;
+                const style = window.getComputedStyle(node);
+                if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+                const rect = node.getBoundingClientRect();
+                return rect.width > 8 && rect.height > 8;
+            };
+            const target = normalizeHref(targetUrl);
+            let targetPath = '';
+            try {
+                if (target) {
+                    const parsed = new URL(target);
+                    targetPath = `${parsed.pathname}${parsed.search}`;
+                }
+            } catch (error) {}
+            const anchors = Array.from(document.querySelectorAll("a[href]")).filter((anchor) => {
+                if (!isVisible(anchor)) return false;
+                const href = normalizeHref(anchor.href);
+                return Boolean(href && target && (href === target || (targetPath && href.includes(targetPath))));
+            });
+            const anchor = anchors[0];
+            if (!anchor) return false;
+            anchor.scrollIntoView({ block: 'center', inline: 'nearest' });
+            anchor.click();
+            return true;
+        }
+    """
+    try:
+        activated = bool(page.evaluate(script, arg=target_url))
+        if activated:
+            page.wait_for_timeout(500)
+            emit_log(log_hook, "INFO", "Post modal detected", "Activated the matching Facebook post surface before extraction.")
+        return activated
+    except Exception:
+        return False
+
+
+def extract_post_date(page, target_url: str = "") -> tuple[str, Optional[datetime], dict[str, Any]]:
+    snapshot = inspect_active_post_scope(page, target_url=target_url)
+    raw_value, parsed = extract_post_date_from_snapshot(snapshot)
+    return raw_value, parsed, snapshot
+
+
+def select_all_comments_mode(page, target_url: str = "", log_hook: Optional[LogHook] = None) -> None:
+    script = """
+        (targetUrl) => {
+            const normalizeHref = (value) => {
+                if (!value) return '';
+                try {
+                    const url = new URL(value, window.location.origin);
+                    for (const key of ['comment_id', 'reply_comment_id', '__tn__', '__cft__', 'ref', 'refsrc', 'notif_t', 'comment_tracking', 'acontext']) {
+                        url.searchParams.delete(key);
+                    }
+                    return `${url.origin}${url.pathname}${url.search}`;
+                } catch (error) {
+                    return String(value || '').split('&__')[0];
+                }
+            };
+            const isVisible = (node) => {
+                if (!node) return false;
+                const style = window.getComputedStyle(node);
+                if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+                const rect = node.getBoundingClientRect();
+                return rect.width > 8 && rect.height > 8;
+            };
+            const target = normalizeHref(targetUrl);
+            let targetPath = '';
+            try {
+                if (target) {
+                    const parsed = new URL(target);
+                    targetPath = `${parsed.pathname}${parsed.search}`;
+                }
+            } catch (error) {}
+            const roots = Array.from(document.querySelectorAll("div[role='dialog'], div[role='main'] div[role='article'], div[role='feed'] div[role='article'], div[data-pagelet*='FeedUnit']"));
+            let root = null;
+            for (const candidate of roots) {
+                if (!isVisible(candidate)) continue;
+                const links = Array.from(candidate.querySelectorAll("a[href]"))
+                    .map((anchor) => normalizeHref(anchor.href))
+                    .filter(Boolean);
+                if (target && links.some((href) => href === target || (targetPath && href.includes(targetPath)))) {
+                    root = candidate;
+                    break;
+                }
+            }
+            if (!root) {
+                root = roots.find(isVisible) || document.querySelector("div[role='main']") || document.body;
+            }
+
+            const collectText = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+            const directOption = Array.from(document.querySelectorAll("[role='menuitem'], [role='option'], div[role='button'], button, span"))
+                .find((node) => isVisible(node) && collectText(node).includes('all comments'));
+            if (directOption) {
+                directOption.click();
+                return "All comments selected";
+            }
+
+            const sortControl = Array.from(root.querySelectorAll("div[role='button'], button, span[role='button'], a[role='button'], span"))
+                .find((node) => {
+                    if (!isVisible(node)) return false;
+                    const text = collectText(node);
+                    return text.includes('most relevant') || text.includes('top comments') || text.includes('newest') || text.includes('all comments');
+                });
+            if (sortControl) {
+                const text = collectText(sortControl);
+                if (text.includes('all comments')) {
+                    return "All comments already selected";
+                }
+                (sortControl.closest("div[role='button'], button, a[role='button']") || sortControl).click();
+                return "Opened comment sort menu";
+            }
+
+            return "";
+        }
+    """
+    for _ in range(3):
+        try:
+            result = (page.evaluate(script, arg=target_url) or "").strip()
+        except Exception:
+            result = ""
+        if not result:
+            return
+        page.wait_for_timeout(COMMENT_LOAD_WAIT_MS)
+        if result.lower().startswith("all comments"):
+            emit_log(log_hook, "INFO", "All comments", result)
+            return
+        if result.lower().startswith("opened"):
+            emit_log(log_hook, "INFO", "All comments", result)
+            continue
+        emit_log(log_hook, "INFO", "All comments", result)
+        return
+
+
+def count_visible_comment_nodes(page, target_url: str = "") -> int:
+    script = """
+        (targetUrl) => {
+            const normalizeHref = (value) => {
+                if (!value) return '';
+                try {
+                    const url = new URL(value, window.location.origin);
+                    for (const key of ['comment_id', 'reply_comment_id', '__tn__', '__cft__', 'ref', 'refsrc', 'notif_t', 'comment_tracking', 'acontext']) {
+                        url.searchParams.delete(key);
+                    }
+                    return `${url.origin}${url.pathname}${url.search}`;
+                } catch (error) {
+                    return String(value || '').split('&__')[0];
+                }
+            };
+            const isVisible = (node) => {
+                if (!node) return false;
+                const style = window.getComputedStyle(node);
+                if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+                const rect = node.getBoundingClientRect();
+                return rect.width > 8 && rect.height > 8;
+            };
+            const target = normalizeHref(targetUrl);
+            let targetPath = '';
+            try {
+                if (target) {
+                    const parsed = new URL(target);
+                    targetPath = `${parsed.pathname}${parsed.search}`;
+                }
+            } catch (error) {}
+            const roots = Array.from(document.querySelectorAll("div[role='dialog'], div[role='main'] div[role='article'], div[role='feed'] div[role='article'], div[data-pagelet*='FeedUnit']"));
+            let root = null;
+            for (const candidate of roots) {
+                if (!isVisible(candidate)) continue;
+                const links = Array.from(candidate.querySelectorAll("a[href]"))
+                    .map((anchor) => normalizeHref(anchor.href))
+                    .filter(Boolean);
+                if (target && links.some((href) => href === target || (targetPath && href.includes(targetPath)))) {
+                    root = candidate;
+                    break;
+                }
+            }
+            if (!root) {
+                root = roots.find(isVisible) || document.querySelector("div[role='main']") || document.body;
+            }
+
+            const candidates = new Set();
+            for (const selector of ["ul li", "div[aria-label*='Comment']", "div[role='article'] ul li"]) {
+                for (const node of root.querySelectorAll(selector)) {
+                    const text = (node.innerText || '').trim();
+                    if (!text || text.length < 8) continue;
+                    candidates.add(node);
+                }
+            }
+            return candidates.size;
+        }
+    """
+    try:
+        return int(page.evaluate(script, arg=target_url) or 0)
     except Exception:
         return 0
 
 
-def expand_visible_comment_threads(page, log_hook: Optional[LogHook] = None, rounds: int = COMMENT_EXPANSION_ROUNDS) -> None:
+def expand_visible_comment_threads(
+    page,
+    target_url: str = "",
+    log_hook: Optional[LogHook] = None,
+    rounds: int = COMMENT_EXPANSION_ROUNDS,
+) -> None:
+    select_all_comments_mode(page, target_url=target_url, log_hook=log_hook)
+
     click_script = """
-        () => {
-            const keywords = [
-                "view more comments",
-                "see more comments",
-                "more comments",
-                "view previous comments",
-                "view more replies",
-                "see more replies",
-                "more replies",
-                "view previous replies",
-            ];
-            const nodes = Array.from(document.querySelectorAll("div[role='button'], button, span"));
-            for (const node of nodes) {
-                const text = (node.innerText || node.textContent || "").trim().toLowerCase();
-                if (!text) continue;
-                if (!keywords.some(keyword => text.includes(keyword))) continue;
-                const target = node.closest("div[role='button'], button") || node;
-                if (!target || target.disabled) continue;
-                const rect = target.getBoundingClientRect();
-                if (rect.width < 1 || rect.height < 1) continue;
-                target.scrollIntoView({ block: "center", inline: "nearest" });
-                target.click();
-                return text;
+        (targetUrl) => {
+            const normalizeHref = (value) => {
+                if (!value) return '';
+                try {
+                    const url = new URL(value, window.location.origin);
+                    for (const key of ['comment_id', 'reply_comment_id', '__tn__', '__cft__', 'ref', 'refsrc', 'notif_t', 'comment_tracking', 'acontext']) {
+                        url.searchParams.delete(key);
+                    }
+                    return `${url.origin}${url.pathname}${url.search}`;
+                } catch (error) {
+                    return String(value || '').split('&__')[0];
+                }
+            };
+            const isVisible = (node) => {
+                if (!node) return false;
+                const style = window.getComputedStyle(node);
+                if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+                const rect = node.getBoundingClientRect();
+                return rect.width > 8 && rect.height > 8;
+            };
+            const target = normalizeHref(targetUrl);
+            let targetPath = '';
+            try {
+                if (target) {
+                    const parsed = new URL(target);
+                    targetPath = `${parsed.pathname}${parsed.search}`;
+                }
+            } catch (error) {}
+            const roots = Array.from(document.querySelectorAll("div[role='dialog'], div[role='main'] div[role='article'], div[role='feed'] div[role='article'], div[data-pagelet*='FeedUnit']"));
+            let root = null;
+            for (const candidate of roots) {
+                if (!isVisible(candidate)) continue;
+                const links = Array.from(candidate.querySelectorAll("a[href]"))
+                    .map((anchor) => normalizeHref(anchor.href))
+                    .filter(Boolean);
+                if (target && links.some((href) => href === target || (targetPath && href.includes(targetPath)))) {
+                    root = candidate;
+                    break;
+                }
             }
-            return "";
+            if (!root) {
+                root = roots.find(isVisible) || document.querySelector("div[role='main']") || document.body;
+            }
+
+            const actions = [
+                { label: 'View more comments', match: (text) => text.includes('view more comments') || text.includes('see more comments') || text.includes('view previous comments') || text.includes('more comments') },
+                { label: 'View replies', match: (text) => text.includes('view replies') || text.includes('view more replies') || text.includes('see more replies') || text.includes('view previous replies') || text.includes('more replies') },
+                { label: 'See more', match: (text, node) => (text === 'see more' || text.startsWith('see more ')) && Boolean(node.closest("ul li, div[aria-label*='Comment'], div[role='article'] ul li")) },
+            ];
+
+            const nodes = Array.from(root.querySelectorAll("div[role='button'], button, span[role='button'], a[role='button'], span"));
+            for (const action of actions) {
+                for (const node of nodes) {
+                    if (!isVisible(node)) continue;
+                    const text = (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                    if (!text || text.length > 80) continue;
+                    if (!action.match(text, node)) continue;
+                    const targetNode = node.closest("div[role='button'], button, a[role='button']") || node;
+                    targetNode.scrollIntoView({ block: 'center', inline: 'nearest' });
+                    targetNode.click();
+                    return action.label;
+                }
+            }
+            return '';
         }
     """
 
-    previous_count = count_visible_comment_nodes(page)
+    previous_count = count_visible_comment_nodes(page, target_url=target_url)
     for round_index in range(1, rounds + 1):
         if round_index > 1:
             try:
-                page.mouse.wheel(0, 900)
+                page.mouse.wheel(0, 1100)
             except Exception:
-                page.evaluate("window.scrollBy(0, 900);")
-        clicked_label = ""
+                page.evaluate("window.scrollBy(0, 1100);")
+
         try:
-            clicked_label = page.evaluate(click_script) or ""
+            clicked_label = (page.evaluate(click_script, arg=target_url) or "").strip()
         except Exception:
             clicked_label = ""
 
-        page.wait_for_timeout(COMMENT_LOAD_WAIT_MS)
-        current_count = count_visible_comment_nodes(page)
+        page.wait_for_timeout(COMMENT_LOAD_WAIT_MS + 300)
+        current_count = count_visible_comment_nodes(page, target_url=target_url)
         if clicked_label:
-            emit_log(log_hook, "INFO", "Comments expanded", f"Round {round_index}: clicked '{clicked_label}' (visible nodes={current_count}).")
+            emit_log(
+                log_hook,
+                "INFO",
+                "Comments expanded",
+                f"Round {round_index}: clicked {clicked_label} (visible nodes={current_count}).",
+            )
         elif current_count > previous_count:
-            emit_log(log_hook, "INFO", "Comments expanded", f"Round {round_index}: more visible comments loaded (visible nodes={current_count}).")
+            emit_log(
+                log_hook,
+                "INFO",
+                "Comments expanded",
+                f"Round {round_index}: more visible comment nodes loaded (visible nodes={current_count}).",
+            )
         else:
             emit_log(log_hook, "INFO", "Comments expanded", f"Round {round_index}: no additional visible comments or replies.")
 
-        if not clicked_label and current_count <= previous_count:
-            previous_count = current_count
-            continue
         previous_count = current_count
 
 
-def extract_visible_comments(page, post_url: str, limit: int = 25, log_hook: Optional[LogHook] = None) -> list[CommentData]:
-    expand_visible_comment_threads(page, log_hook=log_hook)
+def extract_visible_comments(page, post_url: str, limit: int = 50, log_hook: Optional[LogHook] = None) -> list[CommentData]:
+    expand_visible_comment_threads(page, target_url=post_url, log_hook=log_hook)
     script = """
-        (limit) => {
+        (payload) => {
+            const { postUrl, limit } = payload;
+            const normalizeHref = (value) => {
+                if (!value) return '';
+                try {
+                    const url = new URL(value, window.location.origin);
+                    for (const key of ['comment_id', 'reply_comment_id', '__tn__', '__cft__', 'ref', 'refsrc', 'notif_t', 'comment_tracking', 'acontext']) {
+                        url.searchParams.delete(key);
+                    }
+                    return `${url.origin}${url.pathname}${url.search}`;
+                } catch (error) {
+                    return String(value || '').split('&__')[0];
+                }
+            };
+            const isVisible = (node) => {
+                if (!node) return false;
+                const style = window.getComputedStyle(node);
+                if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+                const rect = node.getBoundingClientRect();
+                return rect.width > 8 && rect.height > 8;
+            };
+            const target = normalizeHref(postUrl);
+            let targetPath = '';
+            try {
+                if (target) {
+                    const parsed = new URL(target);
+                    targetPath = `${parsed.pathname}${parsed.search}`;
+                }
+            } catch (error) {}
+            const roots = Array.from(document.querySelectorAll("div[role='dialog'], div[role='main'] div[role='article'], div[role='feed'] div[role='article'], div[data-pagelet*='FeedUnit']"));
+            let root = null;
+            for (const candidate of roots) {
+                if (!isVisible(candidate)) continue;
+                const links = Array.from(candidate.querySelectorAll("a[href]"))
+                    .map((anchor) => normalizeHref(anchor.href))
+                    .filter(Boolean);
+                if (target && links.some((href) => href === target || (targetPath && href.includes(targetPath)))) {
+                    root = candidate;
+                    break;
+                }
+            }
+            if (!root) {
+                root = roots.find(isVisible) || document.querySelector("div[role='main']") || document.body;
+            }
+
             const results = [];
             const seen = new Set();
-            const selectors = [
-                "div[role='dialog'] ul li",
-                "div[role='article'] ul li",
-                "div[aria-label*='Comment']",
-            ];
+            const datePattern = /(just now|\\d+\\s*(?:s|m|h|d|w)|\\d+\\s+(?:second|minute|hour|day|week|month|year)s?\\s+ago|yesterday|today|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i;
+            const uiTokens = new Set(['like', 'reply', 'author', 'edited', 'top fan', 'follow', 'message']);
             const candidates = [];
-            for (const selector of selectors) {
-                for (const node of document.querySelectorAll(selector)) {
-                    candidates.push(node);
+            const commentRoots = Array.from(root.querySelectorAll("div[aria-label*='Comment'], ul, div[role='article'] ul"))
+                .filter((node) => isVisible(node) && /(comment|reply)/i.test((node.innerText || '').slice(0, 250)));
+            const searchRoots = commentRoots.length ? commentRoots : [root];
+            for (const searchRoot of searchRoots) {
+                for (const selector of ["ul li", "div[aria-label*='Comment']"]) {
+                    for (const node of searchRoot.querySelectorAll(selector)) {
+                        if (isVisible(node)) candidates.push(node);
+                    }
                 }
             }
 
-            const datePattern = /(just now|\\d+\\s*(?:s|m|h|d|w)|\\d+\\s+(?:second|minute|hour|day|week|month|year)s?\\s+ago|yesterday|today|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i;
-            const uiTokens = new Set(["like", "reply", "author", "edited", "top fan", "follow", "message"]);
-
             for (const node of candidates) {
                 const text = (node.innerText || '').trim();
-                if (!text || text.length < 8 || seen.has(text)) continue;
-                const lines = text.split('\\n').map(line => line.trim()).filter(Boolean);
+                if (!text || text.length < 8 || text.length > 800) continue;
+                const lines = text.split('\\n').map((line) => line.trim()).filter(Boolean);
                 if (!lines.length) continue;
 
                 let commenter = '';
@@ -1156,7 +1809,7 @@ def extract_visible_comments(page, post_url: str, limit: int = 25, log_hook: Opt
                 }
 
                 let commentDate = '';
-                const dateNode = node.querySelector("abbr, time, a[aria-label]");
+                const dateNode = node.querySelector("abbr, time, a[aria-label], span[aria-label]");
                 if (dateNode) {
                     commentDate = (
                         dateNode.getAttribute('aria-label') ||
@@ -1166,7 +1819,7 @@ def extract_visible_comments(page, post_url: str, limit: int = 25, log_hook: Opt
                     ).trim();
                 }
                 if (!commentDate) {
-                    const lineMatch = lines.find(line => datePattern.test(line));
+                    const lineMatch = lines.find((line) => datePattern.test(line));
                     commentDate = lineMatch || '';
                 }
 
@@ -1179,6 +1832,8 @@ def extract_visible_comments(page, post_url: str, limit: int = 25, log_hook: Opt
                     if (uiTokens.has(lower)) return false;
                     if (lower.startsWith('view more repl') || lower.startsWith('see more repl')) return false;
                     if (lower.startsWith('view more comment') || lower.startsWith('see more comment')) return false;
+                    if (lower === 'see more') return false;
+                    if (lower.startsWith('facebook facebook facebook')) return false;
                     return true;
                 });
 
@@ -1193,7 +1848,7 @@ def extract_visible_comments(page, post_url: str, limit: int = 25, log_hook: Opt
         }
     """
     try:
-        rows = page.evaluate(script, arg=limit)
+        rows = page.evaluate(script, arg={"postUrl": post_url, "limit": limit})
     except Exception:
         return []
 
@@ -1215,57 +1870,106 @@ def extract_visible_comments(page, post_url: str, limit: int = 25, log_hook: Opt
     return comments
 
 
-def extract_text_metrics(page) -> tuple[Optional[int], Optional[int], Optional[int]]:
-    try:
-        body_text = page.locator("body").inner_text(timeout=2500)
-    except Exception:
-        body_text = ""
+def extract_metric_from_texts(texts: list[str], patterns: list[str]) -> Optional[int]:
+    seen: set[str] = set()
+    for raw_text in texts:
+        cleaned = re.sub(r"\s+", " ", raw_text or "").strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        for pattern in patterns:
+            match = re.search(pattern, cleaned, re.IGNORECASE)
+            if match:
+                return parse_count(match.group(1))
+    return None
 
-    reactions = None
-    comments = None
-    shares = None
 
-    reaction_patterns = [
-        r"([\d.,KMBkmb]+)\s+reactions?",
-        r"([\d.,KMBkmb]+)\s+people reacted",
-        r"([\d.,KMBkmb]+)\s+likes?",
-    ]
-    comment_patterns = [
-        r"([\d.,KMBkmb]+)\s+comments?",
-        r"([\d.,KMBkmb]+)\s+comment[s]?\b",
-    ]
-    share_patterns = [
-        r"([\d.,KMBkmb]+)\s+shares?",
-        r"([\d.,KMBkmb]+)\s+share[s]?\b",
-    ]
+def extract_text_metrics(page, target_url: str = "", scope_snapshot: Optional[dict[str, Any]] = None) -> tuple[Optional[int], Optional[int], Optional[int]]:
+    snapshot = scope_snapshot or inspect_active_post_scope(page, target_url=target_url)
+    metric_texts = [re.sub(r"\s+", " ", text or "").strip() for text in (snapshot.get("metricTexts") or []) if text]
+    action_texts = [re.sub(r"\s+", " ", text or "").strip() for text in (snapshot.get("actionTexts") or []) if text]
+    root_text = re.sub(r"\s+", " ", snapshot.get("scopeText") or "").strip()
+    search_texts = action_texts + metric_texts + ([root_text] if root_text else [])
 
-    for pattern in reaction_patterns:
-        match = re.search(pattern, body_text, re.IGNORECASE)
-        if match:
-            reactions = parse_count(match.group(1))
-            break
-    for pattern in comment_patterns:
-        match = re.search(pattern, body_text, re.IGNORECASE)
-        if match:
-            comments = parse_count(match.group(1))
-            break
-    for pattern in share_patterns:
-        match = re.search(pattern, body_text, re.IGNORECASE)
-        if match:
-            shares = parse_count(match.group(1))
-            break
+    reactions = extract_metric_from_texts(
+        search_texts,
+        [
+            r"([\d.,KMBkmb]+)\s+reactions?",
+            r"([\d.,KMBkmb]+)\s+people reacted",
+            r"([\d.,KMBkmb]+)\s+likes?",
+            r"reactions?\s+([\d.,KMBkmb]+)",
+        ],
+    )
+    comments = extract_metric_from_texts(
+        search_texts,
+        [
+            r"([\d.,KMBkmb]+)\s+comments?",
+            r"([\d.,KMBkmb]+)\s+comment[s]?\b",
+            r"comments?\s+([\d.,KMBkmb]+)",
+        ],
+    )
+    shares = extract_metric_from_texts(
+        search_texts,
+        [
+            r"([\d.,KMBkmb]+)\s+shares?",
+            r"([\d.,KMBkmb]+)\s+share[s]?\b",
+            r"shares?\s+([\d.,KMBkmb]+)",
+        ],
+    )
 
     return reactions, comments, shares
 
 
-def open_post_for_extraction(page, url: str, goto_timeout: int = POST_GOTO_TIMEOUT) -> tuple[str, Optional[datetime], str]:
+def wait_for_active_post_scope(page, target_url: str, timeout_ms: int = 5000) -> dict[str, Any]:
+    deadline = time.perf_counter() + max(timeout_ms, 500) / 1000
+    best_snapshot: dict[str, Any] = {}
+    while time.perf_counter() < deadline:
+        snapshot = inspect_active_post_scope(page, target_url=target_url)
+        if snapshot.get("found"):
+            best_snapshot = snapshot
+            if (
+                snapshot.get("matchedTarget")
+                or snapshot.get("matchedSlug")
+                or snapshot.get("dateCandidates")
+                or snapshot.get("metricTexts")
+                or snapshot.get("actionTexts")
+            ):
+                return snapshot
+        page.wait_for_timeout(250)
+    return best_snapshot
+
+
+def open_post_for_extraction(
+    page,
+    url: str,
+    goto_timeout: int = POST_GOTO_TIMEOUT,
+    log_hook: Optional[LogHook] = None,
+) -> tuple[str, Optional[datetime], str, dict[str, Any]]:
     page.goto(url, wait_until="domcontentloaded", timeout=goto_timeout)
     wait_for_selector(page, "body", 2000)
     apply_local_page_preferences(page)
-    page.wait_for_timeout(200)
+    page.wait_for_timeout(450)
+    focus_target_post(page, url, log_hook=log_hook)
+    page.wait_for_timeout(600)
     post_type = infer_post_type(url)
-    raw_date, date_obj = extract_post_date(page)
-    return raw_date, date_obj, post_type
+    scope_snapshot = wait_for_active_post_scope(page, url)
+    if scope_snapshot.get("found") and not (
+        scope_snapshot.get("matchedTarget")
+        or scope_snapshot.get("matchedSlug")
+        or scope_snapshot.get("metricTexts")
+        or scope_snapshot.get("actionTexts")
+    ):
+        if activate_target_post_surface(page, url, log_hook=log_hook):
+            scope_snapshot = wait_for_active_post_scope(page, url, timeout_ms=6000)
+    raw_date, date_obj = extract_post_date_from_snapshot(scope_snapshot)
+    if scope_snapshot.get("found"):
+        emit_log(
+            log_hook,
+            "INFO",
+            "Post surface detected",
+            f"Using {scope_snapshot.get('scopeType', 'post')} scoped extraction for the active Facebook post.",
+        )
+    return raw_date, date_obj, post_type, scope_snapshot
 
 
 def extract_metrics_from_loaded_post(
@@ -1276,31 +1980,41 @@ def extract_metrics_from_loaded_post(
     post_type: str,
     collection_type: str,
     log_hook: Optional[LogHook] = None,
+    scope_snapshot: Optional[dict[str, Any]] = None,
 ) -> PostData:
-    reactions, comments_count, shares = extract_text_metrics(page)
+    snapshot = scope_snapshot or inspect_active_post_scope(page, target_url=url)
+    reactions, comments_count, shares = extract_text_metrics(page, target_url=url, scope_snapshot=snapshot)
     notes: list[str] = []
     if reactions is None:
-        notes.append("Reactions not visible")
+        notes.append("Reactions unavailable in active post view")
+    else:
+        emit_log(log_hook, "INFO", "Reactions extracted", str(reactions))
     if comments_count is None:
-        notes.append("Comments count not visible")
+        notes.append("Comments count unavailable in active post view")
+    else:
+        emit_log(log_hook, "INFO", "Comments count extracted", str(comments_count))
     if shares is None:
-        notes.append("Shares not visible")
+        notes.append("Shares unavailable in active post view")
+    else:
+        emit_log(log_hook, "INFO", "Shares extracted", str(shares))
 
     comments_preview: list[CommentData] = []
     if collection_type == "posts_with_comments":
         comments_preview = extract_visible_comments(page, url, log_hook=log_hook)
         if not comments_preview:
             notes.append("No visible comment samples captured")
+        else:
+            emit_log(log_hook, "INFO", "Visible comments captured", f"{len(comments_preview)} comments/replies collected for the active post.")
 
     emit_log(
         log_hook,
         "INFO",
         "Metrics extracted",
         (
-            f"{url} -> reactions={reactions if reactions is not None else 'N/A'}, "
-            f"comments={comments_count if comments_count is not None else 'N/A'}, "
-            f"shares={shares if shares is not None else 'N/A'}, "
-            f"date={raw_date or 'N/A'}"
+            f"{url} -> reactions={reactions if reactions is not None else 'Unavailable'}, "
+            f"comments={comments_count if comments_count is not None else 'Unavailable'}, "
+            f"shares={shares if shares is not None else 'Unavailable'}, "
+            f"date={raw_date or 'Unavailable'}"
         ),
     )
 
