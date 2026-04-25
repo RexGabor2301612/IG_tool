@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>S&amp;R Extract | {{ platform_config.platformName }}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand-wrap">
+            <div class="brand-logo">S&amp;R</div>
+            <div class="brand-copy">
+                <h1 class="brand-title">S&amp;R Extract</h1>
+                <p class="brand-subtitle">{{ platform_config.workspaceSubtitle }}</p>
+            </div>
+        </div>
+
+        <nav class="platform-switcher" aria-label="Platform switcher">
+            {% for platform in platform_config.platforms %}
+            <a
+                href="{{ platform.href }}"
+                class="platform-pill{% if platform.active %} active{% endif %}{% if platform.placeholder %} placeholder{% endif %}"
+                data-platform="{{ platform.key }}"
+            >
+                <span class="platform-pill-mark">{{ platform.shortLabel }}</span>
+                <span class="platform-pill-text">{{ platform.label }}</span>
+            </a>
+            {% endfor %}
+        </nav>
+
+        <button class="about-btn" id="aboutUsBtn" type="button">
+            <img src="{{ url_for('asset_file', filename='icons8-about-us.svg') }}" alt="" class="about-btn-icon">
+            <span>About</span>
+        </button>
+    </header>
+
+    <main class="workspace">
+        <section class="left-stack">
+            <span class="status-chip">Live backend connected</span>
+            <div class="hero-copy">
+                <h2 class="hero-title">{{ platform_config.heroTitle }}</h2>
+                <p class="hero-text">{{ platform_config.heroText }}</p>
+            </div>
+
+            <form class="input-card" id="searchForm">
+                <div class="field-group field-group-full">
+                    <label class="field-label" for="platformLink">{{ platform_config.linkLabel }}</label>
+                    <input
+                        id="platformLink"
+                        name="platformLink"
+                        type="url"
+                        class="text-input"
+                        placeholder="{{ platform_config.linkPlaceholder }}"
+                        autocomplete="off"
+                    >
+                </div>
+
+                <div class="field-grid">
+                    <div class="field-group">
+                        <label class="field-label" for="scrollRounds">{{ platform_config.roundsLabel }}</label>
+                        <input id="scrollRounds" name="scrollRounds" type="number" min="1" class="text-input" value="12">
+                    </div>
+
+                    <div class="field-group{% if not platform_config.collectionTypeEnabled %} hidden{% endif %}" id="collectionTypeGroup">
+                        <label class="field-label" for="collectionType">{{ platform_config.collectionTypeLabel }}</label>
+                        <select id="collectionType" name="collectionType" class="text-input">
+                            {% for option in platform_config.collectionTypeOptions %}
+                            <option value="{{ option.value }}">{{ option.label }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+
+                    <div class="field-group">
+                        <label class="field-label" for="startDate">Start date</label>
+                        <input id="startDate" name="startDate" type="date" class="text-input">
+                    </div>
+
+                    <div class="field-group">
+                        <label class="field-label" for="endDate">End date</label>
+                        <input id="endDate" name="endDate" type="date" class="text-input">
+                    </div>
+                </div>
+
+                <div class="field-group field-group-full">
+                    <label class="field-label" for="outputFile">Excel filename</label>
+                    <input
+                        id="outputFile"
+                        name="outputFile"
+                        type="text"
+                        class="text-input"
+                        value="{{ platform_config.defaultOutputFile }}"
+                        autocomplete="off"
+                    >
+                </div>
+
+                <input id="overwrite" name="overwrite" type="hidden" value="false">
+
+                <div class="toggle-row">
+                    <label class="checkbox-control">
+                        <input id="latestMode" name="latestMode" type="checkbox"{% if platform_config.defaultLatestMode %} checked{% endif %}>
+                        <span class="checkbox-box"></span>
+                        <span class="checkbox-label">{{ platform_config.latestModeLabel }}</span>
+                    </label>
+                </div>
+
+                <div class="overwrite-panel hidden" id="overwritePanel">
+                    <p class="overwrite-text" id="overwriteText"></p>
+                    <div class="overwrite-actions">
+                        <button class="secondary-inline-btn" id="confirmOverwriteBtn" type="button">Overwrite existing file</button>
+                        <button class="secondary-inline-btn" id="newFilenameBtn" type="button">Pick another filename</button>
+                    </div>
+                </div>
+
+                <button class="primary-btn" id="reviewSetupBtn" type="submit">Review Setup</button>
+                <p class="form-message" id="formMessage"></p>
+            </form>
+        </section>
+
+        <section class="center-stack">
+            <article class="status-panel">
+                <div class="panel-head">
+                    <div>
+                        <p class="panel-eyebrow">Current Status</p>
+                        <h3 class="panel-title" id="statusTitle">Waiting for input</h3>
+                    </div>
+                    <span class="status-badge idle" id="statusBadge">idle</span>
+                </div>
+
+                <div class="status-grid">
+                    <div class="status-card">
+                        <p class="status-card-label">{{ platform_config.progressCardLabel }}</p>
+                        <p class="status-card-value" id="scrollRoundText">Round 0 / 0</p>
+                    </div>
+                    <div class="status-card">
+                        <p class="status-card-label">{{ platform_config.currentItemLabel }}</p>
+                        <p class="status-card-value" id="currentPostText">None</p>
+                    </div>
+                </div>
+
+                <div class="meter-group">
+                    <div class="meter-head">
+                        <span>Progress</span>
+                        <span id="progressText">0%</span>
+                    </div>
+                    <div class="meter-track"><span class="meter-fill progress-fill" id="progressFill"></span></div>
+                </div>
+
+                <div class="meter-group">
+                    <div class="meter-head">
+                        <span>Success Rate</span>
+                        <span id="successText">0%</span>
+                    </div>
+                    <div class="meter-track"><span class="meter-fill success-fill" id="successFill"></span></div>
+                </div>
+
+                <div class="meter-group">
+                    <div class="meter-head">
+                        <span>Scrape Health</span>
+                        <span id="healthText">100%</span>
+                    </div>
+                    <div class="meter-track"><span class="meter-fill health-fill" id="healthFill"></span></div>
+                </div>
+            </article>
+
+            <div class="output-row">
+                <div class="output-card">
+                    <p class="panel-eyebrow">Output File</p>
+                    <p class="output-file-name" id="outputFileText">Not selected</p>
+                </div>
+                <button class="download-btn disabled" id="downloadBtn" type="button" disabled>
+                    <span class="download-icon">↓</span>
+                    <span>Download</span>
+                </button>
+            </div>
+
+            <button class="cancel-btn disabled" id="cancelBtn" type="button" disabled>Cancel</button>
+            <p class="cancel-note">Click to stop the {{ platform_config.platformName }} extraction process safely.</p>
+
+            <div class="primary-actions">
+                <button class="primary-btn" id="runStartBtn" type="button">Run / Start</button>
+                <button class="primary-btn go-btn disabled" id="goBtn" type="button" disabled>GO / Start Extraction</button>
+            </div>
+            <div class="secondary-actions">
+                <button class="secondary-btn disabled" id="focusBrowserBtn" type="button" disabled>Focus Browser</button>
+                <button class="secondary-btn" id="centerShowLogsBtn" type="button">Show Logs</button>
+            </div>
+
+            <article class="browser-session-panel">
+                <div class="panel-head">
+                    <div>
+                        <p class="panel-eyebrow">Browser Session</p>
+                        <h3 class="panel-title">{{ platform_config.browserSessionTitle }}</h3>
+                    </div>
+                    <span class="browser-status-pill">Live</span>
+                </div>
+                <p class="browser-description" id="browserModeDescription">{{ platform_config.browserSessionDescription }}</p>
+                <div class="browser-grid">
+                    <div class="browser-card">
+                        <p class="panel-eyebrow">Browser Mode</p>
+                        <p class="browser-card-value" id="browserModeText">No browser session yet.</p>
+                    </div>
+                    <div class="browser-card">
+                        <p class="panel-eyebrow">Session Status</p>
+                        <p class="browser-card-value" id="browserSessionStatusText">Waiting for Run / Start.</p>
+                    </div>
+                    <div class="browser-card">
+                        <p class="panel-eyebrow">Current Page</p>
+                        <p class="browser-card-value" id="browserSessionUrlText">-</p>
+                    </div>
+                    <div class="browser-card">
+                        <p class="panel-eyebrow">Extraction Gate</p>
+                        <p class="browser-card-value" id="goStatusText">Waiting for Run / Start.</p>
+                    </div>
+                </div>
+            </article>
+        </section>
+
+        <section class="right-stack">
+            <article class="logs-panel">
+                <div class="panel-head">
+                    <div>
+                        <p class="panel-eyebrow">System Monitor</p>
+                        <h3 class="panel-title">{{ platform_config.activityLogsTitle }}</h3>
+                    </div>
+                    <button class="icon-shell" id="expandLogsBtn" type="button" aria-label="Expand logs">
+                        <img src="{{ url_for('asset_file', filename='icons8-expand-50.png') }}" alt="">
+                    </button>
+                </div>
+
+                <div class="tag-row">
+                    <span class="tag" id="tagStartDate">Date: -</span>
+                    <span class="tag" id="tagMaxScroll">{{ platform_config.depthTagLabel }}: -</span>
+                    <span class="tag" id="tagRound">Round: 0</span>
+                </div>
+
+                <div class="logs-table-wrap">
+                    <table class="logs-table">
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Level</th>
+                                <th>Action</th>
+                                <th>Details</th>
+                            </tr>
+                        </thead>
+                        <tbody id="logsBody">
+                            <tr>
+                                <td>-</td>
+                                <td><span class="log-pill info">INFO</span></td>
+                                <td>No logs yet</td>
+                                <td>Review the setup and start a {{ platform_config.platformName }} extraction job.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="logs-actions">
+                    <button class="logs-btn refresh" id="refreshStatusBtn" type="button">Refresh Logs</button>
+                    <button class="logs-btn show" id="showLogsBtn" type="button">Show Logs</button>
+                    <button class="logs-btn clear" id="clearLogsBtn" type="button">Clear Logs</button>
+                </div>
+            </article>
+
+            <div class="stats-grid">
+                {% for stat in stats %}
+                <article class="stat-card">
+                    <p class="stat-label">{{ stat.label if loop.index0 != 0 else platform_config.linksFoundLabel }}</p>
+                    <p class="stat-value" id="{% if loop.index0 == 0 %}statPostsFound{% elif loop.index0 == 1 %}statProgress{% elif loop.index0 == 2 %}statSuccessRate{% else %}statErrors{% endif %}">{{ stat.value }}</p>
+                </article>
+                {% endfor %}
+            </div>
+
+            <div class="mini-feature-row">
+                {% for feature in features %}
+                <article class="mini-feature-card">
+                    <p class="mini-feature-tag">{{ feature.tag }}</p>
+                    <h4>{{ feature.title }}</h4>
+                    <p>{{ feature.description }}</p>
+                </article>
+                {% endfor %}
+            </div>
+        </section>
+    </main>
+
+    <div class="modal-backdrop hidden" id="confirmationModal">
+        <div class="modal-card">
+            <p class="modal-eyebrow">Confirmation Required</p>
+            <h3 class="modal-title">{{ platform_config.reviewTitle }}</h3>
+            <div class="summary-grid">
+                <div>
+                    <p class="summary-label">{{ platform_config.linkLabel }}</p>
+                    <p class="summary-value" id="summaryLink">-</p>
+                </div>
+                <div>
+                    <p class="summary-label">{{ platform_config.roundsLabel }}</p>
+                    <p class="summary-value" id="summaryScroll">-</p>
+                </div>
+                <div>
+                    <p class="summary-label">Date coverage</p>
+                    <p class="summary-value" id="summaryCoverage">-</p>
+                </div>
+                <div class="{% if not platform_config.collectionTypeEnabled %}hidden{% endif %}" id="summaryCollectionTypeWrap">
+                    <p class="summary-label">{{ platform_config.collectionTypeLabel }}</p>
+                    <p class="summary-value" id="summaryCollectionType">-</p>
+                </div>
+                <div>
+                    <p class="summary-label">Excel file</p>
+                    <p class="summary-value" id="summaryFile">-</p>
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button class="primary-btn" id="confirmStartBtn" type="button">Confirm &amp; Start</button>
+                <button class="secondary-btn" id="editConfigBtn" type="button">Edit Inputs / Close</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="drawer-backdrop hidden" id="logsModal">
+        <div class="drawer-card">
+            <div class="drawer-head">
+                <div>
+                    <p class="panel-eyebrow">Expanded Monitor</p>
+                    <h3 class="panel-title">Full {{ platform_config.activityLogsTitle }}</h3>
+                </div>
+                <button class="logs-btn clear" id="closeLogsModalBtn" type="button">Close</button>
+            </div>
+            <div class="logs-table-wrap modal-logs">
+                <table class="logs-table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Level</th>
+                            <th>Action</th>
+                            <th>Details</th>
+                        </tr>
+                    </thead>
+                    <tbody id="modalLogsBody"></tbody>
+                </table>
+            </div>
+            <div class="selected-log-card" id="selectedLogDetails">Select a log item to inspect its details.</div>
+        </div>
+    </div>
+
+    <div class="modal-backdrop hidden" id="aboutModal">
+        <div class="modal-card about-card">
+            <p class="modal-eyebrow">About S&amp;R Extract</p>
+            <h3 class="modal-title">Manual login, controlled extraction, clearer reporting</h3>
+            <p class="about-copy">
+                This workspace keeps the browser login flow manual, unlocks extraction only after the page is ready, and captures platform-specific public data into Excel with live logs and status feedback.
+            </p>
+            <div class="modal-actions">
+                <button class="primary-btn" id="closeAboutModalBtn" type="button">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        window.PLATFORM_CONFIG = {{ platform_config|tojson }};
+    </script>
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}" defer></script>
+</body>
+</html>

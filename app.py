@@ -14,6 +14,7 @@ from flask import Flask, jsonify, render_template, request, send_file
 from flask_sock import Sock
 from playwright.sync_api import sync_playwright
 
+import app_fb
 import instagram_to_excel as scraper
 
 
@@ -429,7 +430,7 @@ def dashboard_features() -> list[dict[str, str]]:
         },
         {
             "title": "Accurate Metrics",
-            "description": "The backend uses the working visible action-row extraction logic for likes, comments, shares, and reposts.",
+            "description": "The backend uses platform-scoped extraction for visible likes, comments, shares, and related counts.",
             "icon": "MET",
         },
         {
@@ -443,6 +444,134 @@ def dashboard_features() -> list[dict[str, str]]:
             "icon": "XLS",
         },
     ]
+
+
+def platform_switcher(active_key: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "key": "instagram",
+            "label": "Instagram",
+            "shortLabel": "IG",
+            "href": "/instagram",
+            "active": active_key == "instagram",
+            "placeholder": False,
+        },
+        {
+            "key": "facebook",
+            "label": "Facebook",
+            "shortLabel": "FB",
+            "href": "/facebook",
+            "active": active_key == "facebook",
+            "placeholder": False,
+        },
+        {
+            "key": "tiktok",
+            "label": "TikTok",
+            "shortLabel": "TT",
+            "href": "/tiktok",
+            "active": active_key == "tiktok",
+            "placeholder": True,
+        },
+    ]
+
+
+def build_platform_config(platform_key: str) -> dict[str, Any]:
+    platforms = platform_switcher(platform_key)
+
+    if platform_key == "instagram":
+        return {
+            "platformKey": "instagram",
+            "platformName": "Instagram",
+            "workspaceSubtitle": "Instagram extraction workspace",
+            "heroTitle": "Instagram Extraction Workspace",
+            "heroText": "Enter the profile, date coverage, scroll depth, and Excel filename. Review the setup, open the browser session if login is required, then extract visible Instagram post data into Excel.",
+            "linkLabel": "Instagram profile link",
+            "linkPlaceholder": "https://www.instagram.com/username/",
+            "linkPayloadKey": "instagramLink",
+            "roundsLabel": "Scroll rounds",
+            "progressCardLabel": "Profile Scrolled",
+            "currentItemLabel": "Current Post",
+            "linksFoundLabel": "Posts Found",
+            "collectionTypeEnabled": False,
+            "collectionTypeLabel": "Collection type",
+            "collectionTypeOptions": [],
+            "latestModeLabel": "Collect from start date up to latest post",
+            "defaultLatestMode": False,
+            "defaultOutputFile": "instagram_extract.xlsx",
+            "activityLogsTitle": "Instagram Activity Logs",
+            "reviewTitle": "Review Instagram extraction setup",
+            "browserSessionTitle": "Manual Login & GO Signal",
+            "browserSessionDescription": "A real Chromium window opens locally for Instagram login when needed. Reuse the saved session when available, monitor readiness here, then click GO to start extraction.",
+            "depthTagLabel": "Max Scroll",
+            "apiBase": "/api",
+            "wsPath": "/ws/dashboard",
+            "placeholder": False,
+            "platforms": platforms,
+        }
+
+    if platform_key == "facebook":
+        return {
+            "platformKey": "facebook",
+            "platformName": "Facebook",
+            "workspaceSubtitle": "Facebook extraction workspace",
+            "heroTitle": "Facebook Extraction Workspace",
+            "heroText": "Enter a public Facebook page, profile, or post link, choose how deeply to load content, review the setup, then open the browser session and extract visible public data into Excel.",
+            "linkLabel": "Facebook link",
+            "linkPlaceholder": "https://www.facebook.com/...",
+            "linkPayloadKey": "facebookLink",
+            "roundsLabel": "Load rounds",
+            "progressCardLabel": "Load Progress",
+            "currentItemLabel": "Current Item",
+            "linksFoundLabel": "Links Found",
+            "collectionTypeEnabled": True,
+            "collectionTypeLabel": "Collection type",
+            "collectionTypeOptions": [
+                {"value": "posts_only", "label": "Posts only"},
+                {"value": "posts_with_comments", "label": "Posts with visible comments"},
+            ],
+            "latestModeLabel": "Collect from start date up to latest visible content",
+            "defaultLatestMode": True,
+            "defaultOutputFile": "facebook_extract.xlsx",
+            "activityLogsTitle": "Facebook Activity Logs",
+            "reviewTitle": "Review Facebook extraction setup",
+            "browserSessionTitle": "Manual Login & GO Signal",
+            "browserSessionDescription": "A real Chromium window opens locally for Facebook login when needed. Reuse the saved session when possible, complete any checkpoint manually, then click GO when the target page is ready.",
+            "depthTagLabel": "Depth",
+            "apiBase": "/facebook/api",
+            "wsPath": "/facebook/ws/dashboard",
+            "placeholder": False,
+            "platforms": platforms,
+        }
+
+    return {
+        "platformKey": "tiktok",
+        "platformName": "TikTok",
+        "workspaceSubtitle": "TikTok extraction workspace",
+        "heroTitle": "TikTok Extraction Workspace",
+        "heroText": "TikTok support is being prepared. The shared dashboard is ready, but the backend extraction flow is not wired yet.",
+        "linkLabel": "TikTok profile link",
+        "linkPlaceholder": "https://www.tiktok.com/@username",
+        "linkPayloadKey": "tiktokLink",
+        "roundsLabel": "Load rounds",
+        "progressCardLabel": "Load Progress",
+        "currentItemLabel": "Current Item",
+        "linksFoundLabel": "Videos Found",
+        "collectionTypeEnabled": False,
+        "collectionTypeLabel": "Collection type",
+        "collectionTypeOptions": [],
+        "latestModeLabel": "Collect from start date up to latest visible content",
+        "defaultLatestMode": True,
+        "defaultOutputFile": "tiktok_extract.xlsx",
+        "activityLogsTitle": "TikTok Activity Logs",
+        "reviewTitle": "Review TikTok extraction setup",
+        "browserSessionTitle": "Platform Placeholder",
+        "browserSessionDescription": "TikTok is shown here as the next platform slot. The shared shell is ready, but extraction controls are disabled until the backend is implemented.",
+        "depthTagLabel": "Depth",
+        "apiBase": "",
+        "wsPath": "",
+        "placeholder": True,
+        "platforms": platforms,
+    }
 
 
 def parse_date(value: str, field_name: str) -> tuple[Optional[datetime], Optional[str]]:
@@ -1370,8 +1499,37 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
 
 
 @app.route("/")
+@app.route("/instagram")
 def home():
-    return render_template("index.html", stats=empty_stats(), features=dashboard_features(), logs=[])
+    return render_template(
+        "dashboard.html",
+        platform_config=build_platform_config("instagram"),
+        stats=empty_stats(),
+        features=dashboard_features(),
+        logs=[],
+    )
+
+
+@app.route("/facebook")
+def facebook_home():
+    return render_template(
+        "dashboard.html",
+        platform_config=build_platform_config("facebook"),
+        stats=empty_stats(),
+        features=dashboard_features(),
+        logs=[],
+    )
+
+
+@app.route("/tiktok")
+def tiktok_home():
+    return render_template(
+        "dashboard.html",
+        platform_config=build_platform_config("tiktok"),
+        stats=empty_stats(),
+        features=dashboard_features(),
+        logs=[],
+    )
 
 
 @app.get("/assets/<path:filename>")
@@ -1381,6 +1539,46 @@ def asset_file(filename: str):
         return jsonify({"ok": False, "errors": ["Asset not allowed."]}), 404
 
     return send_file(Path(__file__).with_name(filename))
+
+
+@app.post("/facebook/api/validate")
+def facebook_validate():
+    return app_fb.validate_inputs()
+
+
+@app.post("/facebook/api/start")
+def facebook_start():
+    return app_fb.start_scrape()
+
+
+@app.get("/facebook/api/status")
+def facebook_status():
+    return app_fb.status()
+
+
+@app.post("/facebook/api/clear-logs")
+def facebook_clear_logs():
+    return app_fb.clear_logs()
+
+
+@app.post("/facebook/api/cancel")
+def facebook_cancel():
+    return app_fb.cancel_scrape()
+
+
+@app.post("/facebook/api/go")
+def facebook_go():
+    return app_fb.go_signal()
+
+
+@app.post("/facebook/api/focus-browser")
+def facebook_focus_browser():
+    return app_fb.focus_browser()
+
+
+@app.get("/facebook/api/download")
+def facebook_download():
+    return app_fb.download_file()
 
 
 @sock.route("/ws/dashboard")
@@ -1430,6 +1628,11 @@ def dashboard_socket(ws):
         pass
     finally:
         DASHBOARD_HUB.unregister(client)
+
+
+@sock.route("/facebook/ws/dashboard")
+def facebook_dashboard_socket(ws):
+    return app_fb.dashboard_socket(ws)
 
 
 @app.post("/api/validate")
