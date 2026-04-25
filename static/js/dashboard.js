@@ -186,6 +186,10 @@ function statusTitleFor(state) {
             return "Ready for GO signal";
         case "running":
             return `Extracting ${platformLabel().toLowerCase()} data`;
+        case "awaiting_comments":
+            return "Metrics saved — collect comments?";
+        case "collecting_comments":
+            return "Collecting and classifying comments";
         case "completed":
             return "Completed";
         case "failed":
@@ -421,10 +425,23 @@ function connectSocket(force = false) {
     socket.addEventListener("message", (event) => {
         try {
             const payload = JSON.parse(event.data);
-            if (payload.type === "status_update") {
+            // Backend emits "snapshot" and "log" (not status_update/log_event)
+            if (payload.type === "snapshot" || payload.type === "status_update") {
                 renderStatus(payload.data || {});
-            } else if (payload.type === "log_event" && payload.data) {
+            } else if ((payload.type === "log" || payload.type === "log_event") && payload.data) {
                 appendLiveLog(payload.data);
+            } else if (payload.type === "comments_prompt") {
+                showCommentsModal(payload.data?.postCount || 0);
+            } else if (payload.type === "comments_completed") {
+                hideCommentsModal();
+                formMessage.textContent = `Comments collected and saved. Download your file.`;
+                formMessage.className = "form-message success";
+                refreshStatus();
+            } else if (payload.type === "comments_skipped") {
+                hideCommentsModal();
+                refreshStatus();
+            } else if (payload.type === "job_completed") {
+                refreshStatus();
             }
         } catch (error) {
             console.warn("Failed to parse websocket payload", error);
@@ -713,3 +730,49 @@ refreshStatus().catch((error) => {
     formMessage.textContent = error.message;
     formMessage.className = "form-message error";
 });
+
+// ---------------------------------------------------------------------------
+// Comment collection modal
+// ---------------------------------------------------------------------------
+const commentsModal = document.getElementById("commentsModal");
+const commentsPostCount = document.getElementById("commentsPostCount");
+const collectCommentsBtn = document.getElementById("collectCommentsBtn");
+const skipCommentsBtn = document.getElementById("skipCommentsBtn");
+
+function showCommentsModal(postCount) {
+    if (!commentsModal) return;
+    if (commentsPostCount) commentsPostCount.textContent = String(postCount || 0);
+    commentsModal.classList.remove("hidden");
+}
+
+function hideCommentsModal() {
+    if (commentsModal) commentsModal.classList.add("hidden");
+}
+
+collectCommentsBtn?.addEventListener("click", async () => {
+    hideCommentsModal();
+    try {
+        await fetchJson(apiUrl("/collect-comments"), { method: "POST" });
+        formMessage.textContent = "Comment collection started. This may take a while…";
+        formMessage.className = "form-message info";
+        await refreshStatus();
+    } catch (error) {
+        formMessage.textContent = error.message;
+        formMessage.className = "form-message error";
+    }
+});
+
+skipCommentsBtn?.addEventListener("click", async () => {
+    hideCommentsModal();
+    try {
+        await fetchJson(apiUrl("/skip-comments"), { method: "POST" });
+        formMessage.textContent = "Comment collection skipped. File is ready to download.";
+        formMessage.className = "form-message success";
+        await refreshStatus();
+        triggerDownload();
+    } catch (error) {
+        formMessage.textContent = error.message;
+        formMessage.className = "form-message error";
+    }
+});
+

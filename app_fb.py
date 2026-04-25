@@ -14,10 +14,80 @@ from flask_sock import Sock
 from playwright.sync_api import sync_playwright
 
 import facebook_to_excel as scraper
+from modules.comment_collector_fb import collect_all_comments_fb
+from modules.excel_exporter import save_posts_excel, add_comments_sheet, update_sentiment_counts
+from modules.sentiment_classifier import classify_comments
 
 
 app = Flask(__name__)
 sock = Sock(app)
+
+
+def standalone_platform_switcher() -> list[dict[str, Any]]:
+    return [
+        {
+            "key": "instagram",
+            "label": "Instagram",
+            "shortLabel": "IG",
+            "meta": "Available in unified app",
+            "href": "#",
+            "active": False,
+            "placeholder": True,
+        },
+        {
+            "key": "facebook",
+            "label": "Facebook",
+            "shortLabel": "FB",
+            "meta": "Pages and posts",
+            "href": "/",
+            "active": True,
+            "placeholder": False,
+        },
+        {
+            "key": "tiktok",
+            "label": "TikTok",
+            "shortLabel": "TT",
+            "meta": "Coming soon",
+            "href": "#",
+            "active": False,
+            "placeholder": True,
+        },
+    ]
+
+
+def standalone_platform_config() -> dict[str, Any]:
+    return {
+        "platformKey": "facebook",
+        "platformName": "Facebook",
+        "workspaceSubtitle": "Facebook extraction workspace",
+        "heroTitle": "Facebook Extraction Workspace",
+        "heroText": "Enter a public Facebook page, profile, or post link, choose how deeply to load content, review the setup, then open the browser session and extract visible public data into Excel.",
+        "linkLabel": "Facebook link",
+        "linkPlaceholder": "https://www.facebook.com/...",
+        "linkPayloadKey": "facebookLink",
+        "roundsLabel": "Load rounds",
+        "progressCardLabel": "Load Progress",
+        "currentItemLabel": "Current Item",
+        "linksFoundLabel": "Links Found",
+        "collectionTypeEnabled": True,
+        "collectionTypeLabel": "Collection type",
+        "collectionTypeOptions": [
+            {"value": "posts_only", "label": "Posts only"},
+            {"value": "posts_with_comments", "label": "Posts with visible comments"},
+        ],
+        "latestModeLabel": "Collect from start date up to latest visible content",
+        "defaultLatestMode": True,
+        "defaultOutputFile": "facebook_extract.xlsx",
+        "activityLogsTitle": "Facebook Activity Logs",
+        "reviewTitle": "Review Facebook extraction setup",
+        "browserSessionTitle": "Manual Login & GO Signal",
+        "browserSessionDescription": "A real Chromium window opens locally for Facebook login when needed. Reuse the saved session when possible, complete any checkpoint manually, then click GO when the target page is ready.",
+        "depthTagLabel": "Depth",
+        "apiBase": "/api",
+        "wsPath": "/ws/dashboard",
+        "placeholder": False,
+        "platforms": standalone_platform_switcher(),
+    }
 
 
 class ScrapeCancelled(Exception):
@@ -135,6 +205,11 @@ class ScrapeJobState:
         self.browser_url = ""
         self.started_at: Optional[float] = None
         self.finished_at: Optional[float] = None
+        # Comment collection phase
+        self.awaiting_comments = False
+        self.comments_requested = False
+        self.skip_comments_requested = False
+        self.collected_post_urls: list[str] = []
 
     def add_log(self, level: str, action: str, details: str = "") -> None:
         with self.lock:
@@ -184,6 +259,30 @@ class ScrapeJobState:
     def should_go(self) -> bool:
         with self.lock:
             return self.go_requested
+
+    def request_collect_comments(self) -> bool:
+        with self.lock:
+            if not self.awaiting_comments or self.comments_requested:
+                return False
+            self.comments_requested = True
+            self.awaiting_comments = False
+            return True
+
+    def request_skip_comments(self) -> bool:
+        with self.lock:
+            if not self.awaiting_comments or self.skip_comments_requested:
+                return False
+            self.skip_comments_requested = True
+            self.awaiting_comments = False
+            return True
+
+    def should_collect_comments(self) -> bool:
+        with self.lock:
+            return self.comments_requested
+
+    def should_skip_comments(self) -> bool:
+        with self.lock:
+            return self.skip_comments_requested
 
     def snapshot(self, include_logs: bool = True) -> dict[str, Any]:
         with self.lock:
@@ -1061,7 +1160,80 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                 JOB.add_log("WARN", "No matching posts", reason)
 
             JOB.add_log("SUCCESS", "Excel saved", config.output_file)
-            JOB.update(status="completed", active_task="Completed", progress=100, finished_at=time.time(), ready_to_scrape=False)
+
+            # ------------------------------------------------------------------
+            # Phase 8 — Rewrite in unified Excel format
+            # ------------------------------------------------------------------
+            try:
+                from urllib.parse import urlparse as _urlparse
+                page_name = _urlparse(config.target_url).path.strip("/").split("/")[0] or "Facebook"
+                save_posts_excel(
+                    all_posts,
+                    config.output_file,
+                    coverage_label,
+                    page_name,
+                    "facebook",
+                )
+                JOB.add_log("INFO", "Unified Excel format applied", config.output_file)
+            except Exception as _xlsx_exc:
+                JOB.add_log("WARN", "Unified Excel export skipped", str(_xlsx_exc))
+
+            # Store post URLs for comment collection
+            with JOB.lock:
+                JOB.collected_post_urls = [p.url for p in all_posts]
+
+            # ------------------------------------------------------------------
+            # Phase 9 — Prompt user for comment collection (wait up to 10 min)
+            # ------------------------------------------------------------------
+            JOB.update(
+                status="awaiting_comments",
+                active_task="Waiting for comment collection decision",
+                awaiting_comments=True,
+                comments_requested=False,
+                skip_comments_requested=False,
+            )
+            JOB.add_log("INFO", "Asking user for comments", "Metrics saved. Decide whether to collect all comments.")
+            broadcast_dashboard_event("comments_prompt", {
+                "postCount": len(all_posts),
+                "outputFile": config.output_file,
+            })
+
+            comment_deadline = time.monotonic() + 600   # 10-minute timeout
+            while time.monotonic() < comment_deadline:
+                if JOB.should_cancel():
+                    raise ScrapeCancelled("Cancelled while waiting for comment collection decision.")
+                if JOB.should_collect_comments() or JOB.should_skip_comments():
+                    break
+                drain_control_commands(page)
+                time.sleep(0.3)
+
+            # ------------------------------------------------------------------
+            # Phase 10 — Execute or skip comment collection
+            # ------------------------------------------------------------------
+            if JOB.should_collect_comments():
+                JOB.update(status="collecting_comments", active_task="Collecting comments from posts", progress=97)
+                JOB.add_log("INFO", "Comment collection started", f"Collecting comments from {len(all_posts)} posts.")
+                try:
+                    collected_urls = JOB.collected_post_urls
+                    comments = collect_all_comments_fb(
+                        page,
+                        collected_urls,
+                        log_hook=JOB.add_log,
+                        cancel_check=JOB.should_cancel,
+                    )
+                    JOB.add_log("INFO", "Classifying comment sentiments", f"{len(comments)} comments to classify.")
+                    comments = classify_comments(comments)
+                    add_comments_sheet(config.output_file, comments)
+                    update_sentiment_counts(config.output_file, collected_urls, comments)
+                    JOB.add_log("SUCCESS", "Comments sheet saved", f"{len(comments)} comments written to {config.output_file}")
+                    broadcast_dashboard_event("comments_completed", {"commentCount": len(comments), "outputFile": config.output_file})
+                except Exception as _cmt_exc:
+                    JOB.add_log("WARN", "Comment collection error", str(_cmt_exc))
+            else:
+                JOB.add_log("INFO", "Comment collection skipped", "User chose to skip comment collection.")
+                broadcast_dashboard_event("comments_skipped", {})
+
+            JOB.update(status="completed", active_task="Completed", progress=100, finished_at=time.time(), ready_to_scrape=False, awaiting_comments=False)
             broadcast_dashboard_event("job_completed", JOB.snapshot(include_logs=False))
     except ScrapeCancelled as exc:
         JOB.update(status="cancelled", active_task="Cancelled", finished_at=time.time(), ready_to_scrape=False)
@@ -1134,7 +1306,27 @@ def dashboard_socket(ws):
 
 @app.route("/")
 def home():
-    return render_template("fb.html", stats=empty_stats(), features=dashboard_features(), logs=[])
+    return render_template("dashboard.html", platform_config=standalone_platform_config())
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers — called by the unified app.py router
+# ---------------------------------------------------------------------------
+
+def collect_comments():
+    """Called by unified app.py POST /facebook/api/collect-comments."""
+    if not JOB.request_collect_comments():
+        return jsonify({"ok": False, "errors": ["Not currently waiting for comment collection decision."]}), 409
+    JOB.add_log("INFO", "Comment collection requested", "User chose to collect all Facebook comments.")
+    return jsonify({"ok": True, "status": JOB.snapshot(include_logs=False)})
+
+
+def skip_comments():
+    """Called by unified app.py POST /facebook/api/skip-comments."""
+    if not JOB.request_skip_comments():
+        return jsonify({"ok": False, "errors": ["Not currently waiting for comment collection decision."]}), 409
+    JOB.add_log("INFO", "Comment collection skipped", "User chose to skip Facebook comment collection.")
+    return jsonify({"ok": True, "status": JOB.snapshot(include_logs=False)})
 
 
 @app.get("/assets/<path:filename>")

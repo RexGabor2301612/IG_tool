@@ -21,14 +21,34 @@
 
         <nav class="platform-switcher" aria-label="Platform switcher">
             {% for platform in platform_config.platforms %}
+            {% set pill_classes = "platform-pill" %}
+            {% if platform.active %}
+                {% set pill_classes = pill_classes + " active" %}
+            {% endif %}
+            {% if platform.placeholder %}
+                {% set pill_classes = pill_classes + " placeholder" %}
+            {% endif %}
+            {% if platform.placeholder and not platform.active %}
+            <span class="{{ pill_classes }}" data-platform="{{ platform.key }}" aria-disabled="true">
+                <span class="platform-pill-mark">{{ platform.shortLabel }}</span>
+                <span class="platform-pill-copy">
+                    <span class="platform-pill-text">{{ platform.label }}</span>
+                    <span class="platform-pill-meta">{{ platform.meta }}</span>
+                </span>
+            </span>
+            {% else %}
             <a
                 href="{{ platform.href }}"
-                class="platform-pill{% if platform.active %} active{% endif %}{% if platform.placeholder %} placeholder{% endif %}"
+                class="{{ pill_classes }}"
                 data-platform="{{ platform.key }}"
             >
                 <span class="platform-pill-mark">{{ platform.shortLabel }}</span>
-                <span class="platform-pill-text">{{ platform.label }}</span>
+                <span class="platform-pill-copy">
+                    <span class="platform-pill-text">{{ platform.label }}</span>
+                    <span class="platform-pill-meta">{{ platform.meta }}</span>
+                </span>
             </a>
+            {% endif %}
             {% endfor %}
         </nav>
 
@@ -172,7 +192,7 @@
                     <p class="output-file-name" id="outputFileText">Not selected</p>
                 </div>
                 <button class="download-btn disabled" id="downloadBtn" type="button" disabled>
-                    <span class="download-icon">↓</span>
+                    <span class="download-icon" aria-hidden="true">&darr;</span>
                     <span>Download</span>
                 </button>
             </div>
@@ -358,9 +378,39 @@
         </div>
     </div>
 
+    <!-- ====================================================
+         Comment Collection Modal (appears after metrics save)
+         ==================================================== -->
+    <div class="modal-backdrop hidden" id="commentsModal">
+        <div class="modal-card comments-modal-card">
+            <div class="comments-modal-icon" aria-hidden="true">💬</div>
+            <p class="modal-eyebrow">Extraction Complete</p>
+            <h3 class="modal-title">Collect all comments?</h3>
+            <p class="comments-modal-body">
+                Metrics from <strong><span id="commentsPostCount">0</span> posts</strong> have been saved.
+                Do you also want to collect all visible comments? This will navigate to each post,
+                expand all comments, and write them to a separate sheet in your Excel file —
+                with automatic sentiment classification.
+            </p>
+            <div class="comments-modal-time-note">
+                ⏱ This may take several minutes depending on post count and comment volume.
+            </div>
+            <div class="modal-actions">
+                <button class="primary-btn go-btn" id="collectCommentsBtn" type="button">
+                    Yes, collect &amp; classify comments
+                </button>
+                <button class="secondary-btn" id="skipCommentsBtn" type="button">
+                    No, download now
+                </button>
+            </div>
+        </div>
+    </div>
+
     <script>
         window.PLATFORM_CONFIG = {{ platform_config|tojson }};
     </script>
     <script src="{{ url_for('static', filename='js/dashboard.js') }}" defer></script>
 </body>
 </html>
+
+

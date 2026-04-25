@@ -16,6 +16,9 @@ from playwright.sync_api import sync_playwright
 
 import app_fb
 import instagram_to_excel as scraper
+from modules.comment_collector_ig import collect_all_comments_ig
+from modules.excel_exporter import save_posts_excel, add_comments_sheet, update_sentiment_counts
+from modules.sentiment_classifier import classify_comments
 
 
 app = Flask(__name__)
@@ -200,6 +203,11 @@ class ScrapeJobState:
         self.browser_url = ""
         self.started_at: Optional[float] = None
         self.finished_at: Optional[float] = None
+        # Comment collection phase
+        self.awaiting_comments = False
+        self.comments_requested = False
+        self.skip_comments_requested = False
+        self.collected_post_urls: list[str] = []
 
     def add_log(self, level: str, action: str, details: str = "") -> None:
         entry: dict[str, str]
@@ -252,6 +260,30 @@ class ScrapeJobState:
     def should_go(self) -> bool:
         with self.lock:
             return self.go_requested
+
+    def request_collect_comments(self) -> bool:
+        with self.lock:
+            if not self.awaiting_comments or self.comments_requested:
+                return False
+            self.comments_requested = True
+            self.awaiting_comments = False
+            return True
+
+    def request_skip_comments(self) -> bool:
+        with self.lock:
+            if not self.awaiting_comments or self.skip_comments_requested:
+                return False
+            self.skip_comments_requested = True
+            self.awaiting_comments = False
+            return True
+
+    def should_collect_comments(self) -> bool:
+        with self.lock:
+            return self.comments_requested
+
+    def should_skip_comments(self) -> bool:
+        with self.lock:
+            return self.skip_comments_requested
 
     def snapshot(self, include_logs: bool = True) -> dict[str, Any]:
         with self.lock:
@@ -452,6 +484,7 @@ def platform_switcher(active_key: str) -> list[dict[str, Any]]:
             "key": "instagram",
             "label": "Instagram",
             "shortLabel": "IG",
+            "meta": "Posts and reels",
             "href": "/instagram",
             "active": active_key == "instagram",
             "placeholder": False,
@@ -460,6 +493,7 @@ def platform_switcher(active_key: str) -> list[dict[str, Any]]:
             "key": "facebook",
             "label": "Facebook",
             "shortLabel": "FB",
+            "meta": "Pages and posts",
             "href": "/facebook",
             "active": active_key == "facebook",
             "placeholder": False,
@@ -468,6 +502,7 @@ def platform_switcher(active_key: str) -> list[dict[str, Any]]:
             "key": "tiktok",
             "label": "TikTok",
             "shortLabel": "TT",
+            "meta": "Coming soon",
             "href": "/tiktok",
             "active": active_key == "tiktok",
             "placeholder": True,
@@ -1469,9 +1504,82 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                 )
                 JOB.add_log("WARN", "No posts matched range", empty_reason)
             JOB.add_log("SUCCESS", "Excel saved", config.output_file)
-            broadcast_dashboard_event("job_completed", JOB.snapshot(include_logs=False))
             emit_preview_frame(page, "Excel saved", force=True)
-            JOB.update(status="completed", active_task="Completed", progress=100, finished_at=time.time(), ready_to_scrape=False, login_required=False, verification_required=False)
+
+            # ------------------------------------------------------------------
+            # Phase 8 — Save using new unified exporter format
+            # ------------------------------------------------------------------
+            try:
+                from urllib.parse import urlparse as _urlparse
+                page_name = _urlparse(config.profile_url).path.strip("/").split("/")[0] or "Instagram"
+                save_posts_excel(
+                    filtered_posts,
+                    config.output_file,
+                    coverage_label,
+                    page_name,
+                    "instagram",
+                )
+                JOB.add_log("INFO", "Unified Excel format applied", config.output_file)
+            except Exception as _xlsx_exc:
+                JOB.add_log("WARN", "Unified Excel export skipped", str(_xlsx_exc))
+
+            # Store post URLs for comment collection
+            with JOB.lock:
+                JOB.collected_post_urls = [p.url for p in filtered_posts]
+
+            # ------------------------------------------------------------------
+            # Phase 9 — Prompt user for comment collection (wait up to 10 min)
+            # ------------------------------------------------------------------
+            JOB.update(
+                status="awaiting_comments",
+                active_task="Waiting for comment collection decision",
+                awaiting_comments=True,
+                comments_requested=False,
+                skip_comments_requested=False,
+            )
+            JOB.add_log("INFO", "Asking user for comments", "Metrics saved. Decide whether to collect all comments.")
+            broadcast_dashboard_event("comments_prompt", {
+                "postCount": len(filtered_posts),
+                "outputFile": config.output_file,
+            })
+
+            comment_deadline = time.monotonic() + 600   # 10-minute timeout
+            while time.monotonic() < comment_deadline:
+                if JOB.should_cancel():
+                    raise ScrapeCancelled("Cancelled while waiting for comment collection decision.")
+                if JOB.should_collect_comments() or JOB.should_skip_comments():
+                    break
+                drain_control_commands(page)
+                time.sleep(0.3)
+
+            # ------------------------------------------------------------------
+            # Phase 10 — Execute or skip comment collection
+            # ------------------------------------------------------------------
+            if JOB.should_collect_comments():
+                JOB.update(status="collecting_comments", active_task="Collecting comments from posts", progress=97)
+                JOB.add_log("INFO", "Comment collection started", f"Collecting comments from {len(filtered_posts)} posts.")
+                try:
+                    collected_urls = JOB.collected_post_urls
+                    comments = collect_all_comments_ig(
+                        page,
+                        collected_urls,
+                        log_hook=JOB.add_log,
+                        cancel_check=JOB.should_cancel,
+                    )
+                    JOB.add_log("INFO", "Classifying comment sentiments", f"{len(comments)} comments to classify.")
+                    comments = classify_comments(comments)
+                    add_comments_sheet(config.output_file, comments)
+                    update_sentiment_counts(config.output_file, collected_urls, comments)
+                    JOB.add_log("SUCCESS", "Comments sheet saved", f"{len(comments)} comments written to {config.output_file}")
+                    broadcast_dashboard_event("comments_completed", {"commentCount": len(comments), "outputFile": config.output_file})
+                except Exception as _cmt_exc:
+                    JOB.add_log("WARN", "Comment collection error", str(_cmt_exc))
+            else:
+                JOB.add_log("INFO", "Comment collection skipped", "User chose to skip comment collection.")
+                broadcast_dashboard_event("comments_skipped", {})
+
+            broadcast_dashboard_event("job_completed", JOB.snapshot(include_logs=False))
+            JOB.update(status="completed", active_task="Completed", progress=100, finished_at=time.time(), ready_to_scrape=False, login_required=False, verification_required=False, awaiting_comments=False)
     except ScrapeCancelled as exc:
         JOB.update(status="stopped", active_task="Stopped", finished_at=time.time(), ready_to_scrape=False, login_required=False, verification_required=False)
         JOB.add_log("WARN", "Scrape cancelled", str(exc))
@@ -1539,6 +1647,32 @@ def asset_file(filename: str):
         return jsonify({"ok": False, "errors": ["Asset not allowed."]}), 404
 
     return send_file(Path(__file__).with_name(filename))
+
+
+@app.post("/api/collect-comments")
+def collect_comments():
+    if not JOB.request_collect_comments():
+        return jsonify({"ok": False, "errors": ["Not currently waiting for comment collection decision."]}), 409
+    JOB.add_log("INFO", "Comment collection requested", "User chose to collect all comments.")
+    return jsonify({"ok": True, "status": JOB.snapshot(include_logs=False)})
+
+
+@app.post("/api/skip-comments")
+def skip_comments():
+    if not JOB.request_skip_comments():
+        return jsonify({"ok": False, "errors": ["Not currently waiting for comment collection decision."]}), 409
+    JOB.add_log("INFO", "Comment collection skipped", "User chose to skip comment collection.")
+    return jsonify({"ok": True, "status": JOB.snapshot(include_logs=False)})
+
+
+@app.post("/facebook/api/collect-comments")
+def facebook_collect_comments():
+    return app_fb.collect_comments()
+
+
+@app.post("/facebook/api/skip-comments")
+def facebook_skip_comments():
+    return app_fb.skip_comments()
 
 
 @app.post("/facebook/api/validate")
