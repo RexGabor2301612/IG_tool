@@ -71,6 +71,7 @@ button {
     display: flex;
     align-items: center;
     gap: 16px;
+    min-width: 0;
 }
 
 .brand-logo {
@@ -476,10 +477,12 @@ button {
 }
 
 #currentPostText {
+    line-clamp: 6;
     -webkit-line-clamp: 6;
 }
 
 #browserSessionUrlText {
+    line-clamp: 4;
     -webkit-line-clamp: 4;
 }
 
@@ -584,15 +587,19 @@ button {
 }
 
 .cancel-btn {
-    min-height: 62px;
-    padding: 0 18px;
-    border-radius: 0;
-    background: transparent;
-    color: #334155;
-    border: 5px solid #374151;
-    font-size: 1.05rem;
-    font-weight: 400;
-    box-shadow: none;
+    min-height: 56px;
+    padding: 0 22px;
+    border-radius: 16px;
+    background: #fff1f2;
+    color: #be123c;
+    border: 1px solid #fda4af;
+    font-size: 0.96rem;
+    font-weight: 800;
+    box-shadow: 0 10px 20px rgba(190, 24, 93, 0.14);
+}
+
+.cancel-btn:not(:disabled):hover {
+    background: #ffe4e6;
 }
 
 .cancel-note {
@@ -1022,6 +1029,13 @@ body.about-modal-open {
 @media (max-width: 720px) {
     .topbar {
         padding: 16px 18px;
+        flex-wrap: wrap;
+        align-items: flex-start;
+    }
+
+    .about-icon-btn {
+        width: 100%;
+        justify-content: center;
     }
 
     .workspace {
