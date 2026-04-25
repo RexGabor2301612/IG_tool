@@ -818,10 +818,10 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
     browser = None
     context = None
     page = None
+    resource_blocking_enabled = False
     try:
         with sync_playwright() as p:
             browser, context = scraper.launch_browser(p)
-            context.route("**/*", scraper.route_nonessential_resources)
 
             page = context.new_page()
             JOB.update(browser_session_created=True, browser_url=current_page_url(page, config.target_url))
@@ -851,6 +851,13 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
 
             wait_until_page_ready_or_login_completed(page, context, config.target_url)
             wait_for_go_signal(page, config.target_url)
+            context.route("**/*", scraper.route_nonessential_resources)
+            resource_blocking_enabled = True
+            JOB.add_log(
+                "INFO",
+                "Extraction optimization enabled",
+                "Full rendering stayed on for Facebook login and verification. Non-essential resources are now blocked for extraction.",
+            )
 
             link_collection_started = time.perf_counter()
             links = collect_post_links_with_progress(page, config)
@@ -1005,6 +1012,11 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
         JOB.update(status="failed", active_task="Failed", errors=snapshot["errors"] + 1, finished_at=time.time(), ready_to_scrape=False)
         JOB.add_log("WARN", "Job failed", f"{type(exc).__name__}: {exc}")
     finally:
+        if resource_blocking_enabled and context is not None:
+            try:
+                context.unroute("**/*", scraper.route_nonessential_resources)
+            except Exception:
+                pass
         if context is not None:
             try:
                 context.close()
