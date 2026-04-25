@@ -208,4 +208,5 @@ __marimo__/
 
 # Playwright authenticated session state
 storage_states/*.json
+storage_states/facebook_user_data/
 .auth/*.json

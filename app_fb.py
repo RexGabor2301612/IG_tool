@@ -852,8 +852,22 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
     try:
         with sync_playwright() as p:
             browser, context = scraper.launch_browser(p)
+            existing_pages = []
+            try:
+                existing_pages = [candidate for candidate in context.pages if not candidate.is_closed()]
+            except Exception:
+                existing_pages = []
 
-            page = context.new_page()
+            if existing_pages:
+                page = existing_pages[0]
+                for extra_page in existing_pages[1:]:
+                    try:
+                        extra_page.close()
+                    except Exception:
+                        pass
+                JOB.add_log("INFO", "Reusing existing browser tab", "Using the primary tab from the current Facebook browser session.")
+            else:
+                page = context.new_page()
             JOB.update(browser_session_created=True, browser_url=current_page_url(page, config.target_url))
             JOB.add_log("INFO", "Browser session created", "Created one Playwright browser/context/page for the Facebook job.")
             saved_session_path = scraper.get_storage_state_path(require_exists=True)
@@ -862,6 +876,9 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                 JOB.add_log("INFO", "Saved session found", str(saved_session_path))
             else:
                 JOB.add_log("INFO", "Saved session missing", "No saved Facebook storage_state file is available yet.")
+            profile_path = scraper.get_user_data_dir()
+            if profile_path is not None:
+                JOB.add_log("INFO", "Using persistent browser profile", str(profile_path))
             if using_local_browser_window():
                 try:
                     page.bring_to_front()

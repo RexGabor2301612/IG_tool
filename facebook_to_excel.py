@@ -33,6 +33,7 @@ VERIFICATION_URL_TOKENS = [
 
 PLAYWRIGHT_STORAGE_STATE = os.getenv("PLAYWRIGHT_STORAGE_STATE", "").strip() or None
 DEFAULT_STORAGE_STATE_FILE = Path("storage_states/facebook_auth.json")
+DEFAULT_USER_DATA_DIR = Path("storage_states/facebook_user_data")
 PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").strip().lower() not in {"0", "false", "no", "off"}
 PLAYWRIGHT_AUTO_INSTALL = os.getenv("PLAYWRIGHT_AUTO_INSTALL", "true").strip().lower() not in {"0", "false", "no", "off"}
 RUNNING_ON_RENDER = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") or os.getenv("RENDER_EXTERNAL_URL"))
@@ -136,7 +137,7 @@ def browser_mode_label() -> str:
 
 def browser_mode_note() -> str:
     if uses_local_browser_window():
-        return "A real Chromium window opens locally for Facebook login and verification. Keep that browser open, avoid refreshing the page, and click GO only after the target page is visible."
+        return "A real Chromium window opens locally for Facebook login and verification using a persistent local browser profile. Keep that browser open, avoid refreshing the page, and click GO only after the target page is visible."
     return "This environment cannot open a local Chromium window. Manual Facebook login requires a local run with PLAYWRIGHT_INTERACTIVE_BROWSER=true."
 
 
@@ -163,6 +164,12 @@ def has_saved_storage_state() -> bool:
 def storage_state_label() -> str:
     path = get_storage_state_path()
     return str(path) if path is not None else ""
+
+
+def get_user_data_dir() -> Optional[Path]:
+    if not uses_local_browser_window():
+        return None
+    return DEFAULT_USER_DATA_DIR
 
 
 def has_login_credentials() -> bool:
@@ -531,6 +538,34 @@ def launch_browser(playwright):
             "--no-default-browser-check",
         ],
     }
+    if uses_local_browser_window():
+        user_data_dir = get_user_data_dir()
+        if user_data_dir is None:
+            raise RuntimeError("Facebook local browser mode requires a user data directory.")
+        user_data_dir.mkdir(parents=True, exist_ok=True)
+        persistent_options = {
+            "headless": False,
+            "viewport": {"width": 1440, "height": 960},
+            "locale": "en-US",
+            "args": launch_options["args"],
+        }
+        try:
+            context = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(user_data_dir),
+                **persistent_options,
+            )
+        except PlaywrightError as exc:
+            message = str(exc)
+            missing_browser = "Executable doesn't exist" in message or "Please run the following command" in message
+            if not (PLAYWRIGHT_AUTO_INSTALL and missing_browser):
+                raise
+            install_playwright_browsers()
+            context = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(user_data_dir),
+                **persistent_options,
+            )
+        return None, context
+
     try:
         browser = playwright.chromium.launch(**launch_options)
     except PlaywrightError as exc:
