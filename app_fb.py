@@ -504,6 +504,31 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
         drain_control_commands(page)
         sync_browser_url(page, target_url)
 
+        current_url = current_page_url(page, target_url)
+        if verification_logged and scraper.url_indicates_checkpoint_or_verification(current_url):
+            JOB.update(
+                status="waiting_verification",
+                active_task="Facebook verification required",
+                browser_session_created=True,
+                page_ready=False,
+                login_required=True,
+                verification_required=True,
+                ready_to_scrape=False,
+                browser_url=current_url,
+                current_post=current_url,
+            )
+            if time.monotonic() - last_verification_ping >= 12:
+                JOB.add_log(
+                    "INFO",
+                    "Still waiting for verification",
+                    "Facebook verification is still active. Complete it manually in the opened browser.",
+                )
+                last_verification_ping = time.monotonic()
+            if verification_deadline is not None and time.monotonic() >= verification_deadline:
+                raise TimeoutError("Facebook verification did not complete before timeout. Please try again after completing the checkpoint manually.")
+            time.sleep(1.25)
+            continue
+
         checkpoint_required, checkpoint_reason = scraper.detect_checkpoint_or_verification(page)
         if checkpoint_required:
             if verification_deadline is None:
@@ -533,7 +558,7 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
                 last_verification_ping = time.monotonic()
             if verification_deadline is not None and time.monotonic() >= verification_deadline:
                 raise TimeoutError("Facebook verification did not complete before timeout. Please try again after completing the checkpoint manually.")
-            time.sleep(0.35)
+            time.sleep(1.0)
             continue
 
         if verification_logged and verification_deadline is not None and time.monotonic() >= verification_deadline:
@@ -592,7 +617,6 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
             time.sleep(0.3)
             continue
 
-        current_url = current_page_url(page, target_url)
         if login_page_opened and login_form_logged and not login_form_visible and not login_submit_logged:
             JOB.add_log("INFO", "Login submitted", "The Facebook login form disappeared. Waiting for navigation, session cookies, and page readiness.")
             login_submit_logged = True
