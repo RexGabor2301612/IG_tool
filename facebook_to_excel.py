@@ -607,6 +607,8 @@ def facebook_strong_ready_signal(page, target_url: str = "") -> tuple[bool, str]
     signals = [
         (POST_LINK_SELECTOR, "post links visible"),
         (FEED_READY_SELECTOR, "feed/posts container visible"),
+        ("[aria-label='Account'], div[aria-label='Account']", "account menu visible"),
+        ("a[aria-label='Message'], div[aria-label='Message'], span:has-text('Message')", "message button visible"),
         (PAGE_SHELL_READY_SELECTOR, "page shell/profile content visible"),
         ("div[role='navigation']", "navigation bar visible"),
         ("div[role='main']", "main content visible"),

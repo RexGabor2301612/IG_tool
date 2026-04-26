@@ -232,7 +232,7 @@ class ScrapeJobState:
 
     def request_cancel(self) -> bool:
         with self.lock:
-            if self.status not in {"preparing", "loading_session", "waiting_login", "waiting_verification", "ready", "running"}:
+            if self.status not in {"preparing", "loading_session", "waiting_login", "waiting_verification", "captcha", "ready", "running"}:
                 return False
             self.cancel_requested = True
             self.status = "cancelled"
@@ -245,7 +245,7 @@ class ScrapeJobState:
 
     def request_go(self) -> tuple[bool, str]:
         with self.lock:
-            if self.status == "waiting_verification" or self.verification_required:
+            if self.status in {"waiting_verification", "captcha"} or self.verification_required:
                 return False, "Verification required."
             if self.status in {"preparing", "loading_session", "waiting_login"}:
                 return False, "Page is not ready yet."
@@ -289,6 +289,17 @@ class ScrapeJobState:
 
     def snapshot(self, include_logs: bool = True) -> dict[str, Any]:
         with self.lock:
+            ui_state_map = {
+                "preparing": "preparing",
+                "loading_session": "preparing",
+                "waiting_login": "waiting_login",
+                "waiting_verification": "captcha",
+                "captcha": "captcha",
+                "ready": "ready",
+                "running": "scraping",
+                "completed": "done",
+            }
+            ui_state = ui_state_map.get(self.status, self.status)
             eligible_total = self.posts_in_range + self.failed_extractions
             if eligible_total > 0:
                 success_rate = round(100 * self.posts_success / eligible_total)
@@ -298,10 +309,13 @@ class ScrapeJobState:
             health = max(0, 100 - min(self.errors * 8, 70))
             payload = {
                 "status": self.status,
+                "state": ui_state,
                 "activeTask": self.active_task,
                 "currentPost": self.current_post,
                 "currentScrollRound": self.current_scroll_round,
+                "scrollRound": self.current_scroll_round,
                 "totalScrollRounds": self.total_scroll_rounds,
+                "maxScrollRounds": self.total_scroll_rounds,
                 "postsFound": self.posts_found,
                 "postsChecked": self.posts_checked,
                 "postsProcessed": self.posts_processed,
@@ -315,16 +329,19 @@ class ScrapeJobState:
                 "progress": self.progress,
                 "successRate": success_rate,
                 "health": health,
+                "scrapeHealth": health,
                 "outputFile": self.output_file,
                 "config": self.config_summary,
                 "cancelRequested": self.cancel_requested,
                 "goRequested": self.go_requested,
                 "browserSessionCreated": self.browser_session_created,
                 "pageReady": self.page_ready,
+                "profileReady": self.page_ready,
                 "loginRequired": self.login_required,
                 "verificationRequired": self.verification_required,
                 "readyToScrape": self.ready_to_scrape,
                 "browserUrl": self.browser_url,
+                "browserOpen": self.browser_session_created,
                 "canGo": (
                     self.status == "ready"
                     and self.browser_session_created
@@ -334,6 +351,7 @@ class ScrapeJobState:
                     and not self.go_requested
                 ),
                 "canDownload": self.status == "completed" and bool(self.output_file) and Path(self.output_file).exists(),
+                "downloadReady": self.status == "completed" and bool(self.output_file) and Path(self.output_file).exists(),
             }
             if include_logs:
                 payload["logs"] = list(self.logs)
@@ -346,7 +364,7 @@ JOB_THREAD: Optional[threading.Thread] = None
 DASHBOARD_HUB = DashboardHub()
 CONTROL_BUS = LiveCommandBus()
 LOGIN_READY_TIMEOUT = 180000
-PAGE_READY_TIMEOUT = 30000
+PAGE_READY_TIMEOUT = 15000
 VERIFICATION_READY_TIMEOUT = 1800000
 
 
@@ -607,7 +625,7 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
         current_url = current_page_url(page, target_url)
         if verification_logged and scraper.url_indicates_checkpoint_or_verification(current_url):
             JOB.update(
-                status="waiting_verification",
+                status="captcha",
                 active_task="Facebook verification required",
                 browser_session_created=True,
                 page_ready=False,
@@ -626,7 +644,7 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
                 last_verification_ping = time.monotonic()
             if verification_deadline is not None and time.monotonic() >= verification_deadline:
                 raise TimeoutError("Facebook verification did not complete before timeout. Please try again after completing the checkpoint manually.")
-            time.sleep(1.25)
+            time.sleep(2.0)
             continue
 
         checkpoint_required, checkpoint_reason = scraper.detect_checkpoint_or_verification(page)
@@ -634,7 +652,7 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
             if verification_deadline is None:
                 verification_deadline = time.monotonic() + (VERIFICATION_READY_TIMEOUT / 1000)
             JOB.update(
-                status="waiting_verification",
+                status="captcha",
                 active_task="Facebook verification required",
                 browser_session_created=True,
                 page_ready=False,
@@ -664,7 +682,7 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
                 last_verification_ping = time.monotonic()
             if verification_deadline is not None and time.monotonic() >= verification_deadline:
                 raise TimeoutError("Facebook verification did not complete before timeout. Please try again after completing the checkpoint manually.")
-            time.sleep(1.0)
+            time.sleep(2.0)
             continue
 
         if verification_logged and verification_deadline is not None and time.monotonic() >= verification_deadline:
@@ -920,7 +938,12 @@ def wait_until_page_ready_or_login_completed(page, context, target_url: str) -> 
             return
         time.sleep(0.25)
 
-    raise TimeoutError("Facebook page/feed did not become ready before timeout.")
+    mark_page_ready(page, target_url, waiting_for_go=True)
+    JOB.add_log(
+        "WARN",
+        "Fallback ready mode",
+        "Facebook readiness timed out. Continue manually and click GO / START EXTRACTION when the page is usable.",
+    )
 
 
 def run_scrape_job(config: WebScrapeConfig) -> None:
@@ -1395,10 +1418,30 @@ def go_signal():
     return jsonify({"ok": True, "status": JOB.snapshot(include_logs=False)})
 
 
+@app.post("/api/force-ready")
+def force_ready():
+    snapshot = JOB.snapshot(include_logs=False)
+    if snapshot.get("status") in {"running", "completed", "failed", "cancelled"}:
+        return jsonify({"ok": False, "errors": ["Force Ready is only available before extraction starts."], "status": snapshot}), 409
+    if not snapshot.get("browserSessionCreated"):
+        return jsonify({"ok": False, "errors": ["No browser session is active. Start a run first."], "status": snapshot}), 409
+
+    JOB.update(
+        status="ready",
+        active_task="Ready for extraction",
+        page_ready=True,
+        login_required=False,
+        verification_required=False,
+        ready_to_scrape=True,
+    )
+    JOB.add_log("WARN", "Force Ready enabled", "Manual override was used. Click GO / START EXTRACTION when the target page is visible.")
+    return jsonify({"ok": True, "status": JOB.snapshot(include_logs=False)})
+
+
 @app.post("/api/focus-browser")
 def focus_browser():
     snapshot = JOB.snapshot()
-    if snapshot["status"] not in {"preparing", "loading_session", "waiting_login", "waiting_verification", "ready", "running"}:
+    if snapshot["status"] not in {"preparing", "loading_session", "waiting_login", "waiting_verification", "captcha", "ready", "running"}:
         return jsonify({"ok": False, "errors": ["No active browser session is available to focus."], "status": snapshot}), 409
     if not snapshot.get("localBrowserWindow"):
         return jsonify({"ok": False, "errors": ["This environment does not have a local browser window to focus."], "status": snapshot}), 409

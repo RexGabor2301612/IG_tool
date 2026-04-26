@@ -81,6 +81,8 @@ BODY_TEXT_TIMEOUT = 2500
 NEXT_DATA_TIMEOUT = 1800
 BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
 PROFILE_GRID_SELECTOR = "a[href*='/p/'], a[href*='/reel/']"
+INSTAGRAM_NAV_READY_SELECTOR = "nav[role='navigation'], header nav"
+INSTAGRAM_HOME_READY_SELECTOR = "svg[aria-label='Home'], a[href='/'], a[href='/home/']"
 LOGIN_FORM_SELECTOR = "input[name='username'], input[name='password'], form[action*='/accounts/login/']"
 POST_PRIMARY_SELECTOR = "time, article"
 METRIC_SELECTOR = "svg[aria-label*='ike'], svg[aria-label*='omment'], article [role='button'] svg"
@@ -253,6 +255,28 @@ def profile_grid_visible(page, timeout_ms: int = 400) -> bool:
     return wait_for_selector(page, PROFILE_GRID_SELECTOR, timeout_ms)
 
 
+def instagram_strong_ready_signal(page) -> tuple[bool, str]:
+    checkpoint_required, checkpoint_reason = detect_checkpoint_or_verification(page)
+    if checkpoint_required:
+        return False, checkpoint_reason
+
+    login_required, login_reason = detect_login_gate(page)
+    if login_required:
+        return False, login_reason
+
+    signals = [
+        (PROFILE_GRID_SELECTOR, "profile content links are visible"),
+        (INSTAGRAM_HOME_READY_SELECTOR, "home icon is visible"),
+        (INSTAGRAM_NAV_READY_SELECTOR, "navigation bar is visible"),
+    ]
+
+    for selector, reason in signals:
+        if wait_for_selector(page, selector, 450):
+            return True, reason
+
+    return False, "Instagram page is not ready yet."
+
+
 def detect_login_gate(page) -> tuple[bool, str]:
     if wait_for_selector(page, LOGIN_FORM_SELECTOR, 300):
         return True, "Instagram login form detected."
@@ -294,46 +318,52 @@ def detect_login_gate(page) -> tuple[bool, str]:
 
 
 def detect_checkpoint_or_verification(page) -> tuple[bool, str]:
-    current_url = ""
     try:
-        current_url = page.url or ""
+        current_url = (page.url or "").lower()
     except Exception:
         current_url = ""
 
-    if any(token in current_url for token in ["/challenge/", "two_factor", "onetap", "/accounts/suspended/"]):
-        return True, "Instagram verification or challenge page detected."
+    verification_url_tokens = [
+        "/auth_platform/recaptcha/",
+        "recaptcha",
+        "/challenge/",
+        "challenge",
+        "checkpoint",
+        "two_factor",
+        "/accounts/suspended/",
+    ]
+
+    if any(token in current_url for token in verification_url_tokens):
+        return True, "Instagram verification required. Complete it manually."
 
     try:
-        body_text = page.locator("body").inner_text(timeout=500).lower()
+        body_text = page.locator("body").inner_text(timeout=800).lower()
     except Exception:
         body_text = ""
 
     challenge_phrases = [
+        "captcha",
+        "recaptcha",
+        "challenge",
+        "checkpoint",
         "confirm it's you",
-        "help us confirm you own this account",
+        "help us confirm",
         "security code",
         "enter the code",
         "suspicious login attempt",
-        "challenge required",
-        "captcha",
-        "recaptcha",
-        "check your notifications on another device",
-        "approve login using",
+        "check your notifications",
+        "approve login",
     ]
+
     if any(phrase in body_text for phrase in challenge_phrases):
-        return True, "Instagram requires verification before the profile can be used."
+        return True, "Instagram verification required. Complete it manually."
 
     return False, ""
 
 
 def profile_ready_for_collection(page) -> bool:
-    checkpoint_required, _ = detect_checkpoint_or_verification(page)
-    if checkpoint_required:
-        return False
-    login_required, _ = detect_login_gate(page)
-    if login_required:
-        return False
-    return profile_grid_visible(page, 350)
+    ready, _ = instagram_strong_ready_signal(page)
+    return ready
 
 
 def validate_session(page, context=None, profile_url: str = "") -> dict[str, Any]:
@@ -355,10 +385,11 @@ def validate_session(page, context=None, profile_url: str = "") -> dict[str, Any
             "cookiesPresent": bool(context and has_authenticated_session(context)),
         }
 
-    if profile_ready_for_collection(page):
+    ready, ready_reason = instagram_strong_ready_signal(page)
+    if ready:
         return {
             "state": "ready",
-            "reason": "Instagram profile grid is visible.",
+            "reason": f"Instagram readiness check passed: {ready_reason}.",
             "url": getattr(page, "url", profile_url) or profile_url,
             "cookiesPresent": bool(context and has_authenticated_session(context)),
         }
@@ -369,6 +400,23 @@ def validate_session(page, context=None, profile_url: str = "") -> dict[str, Any
         "url": getattr(page, "url", profile_url) or profile_url,
         "cookiesPresent": bool(context and has_authenticated_session(context)),
     }
+
+
+def dismiss_instagram_save_login_prompt(page) -> bool:
+    # Instagram sometimes pauses on "Save your login info?"; dismiss it quickly.
+    selectors = [
+        "button:has-text('Not now')",
+        "div[role='button']:has-text('Not now')",
+    ]
+    for selector in selectors:
+        try:
+            button = page.locator(selector).first
+            if button.count() > 0:
+                button.click(timeout=500)
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def collect_visible_post_links(page) -> List[str]:
@@ -832,17 +880,16 @@ def click_button_if_visible(page, pattern: str, timeout_ms: int = 1200) -> bool:
     return False
 
 
-def save_storage_state(context, log_hook: Optional[LogHook] = None) -> None:
-    state_path = get_storage_state_path()
-    if state_path is None:
+def save_storage_state(context, log_hook=None) -> None:
+    path = get_storage_state_path(require_exists=False)
+    if path is None:
         return
-
     try:
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        context.storage_state(path=str(state_path))
-        emit_log(log_hook, "INFO", "Storage state saved", str(state_path))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        context.storage_state(path=str(path))
+        emit_log(log_hook, "SUCCESS", "Session saved", f"Saved login session to {path}")
     except Exception as exc:
-        emit_log(log_hook, "WARN", "Session save skipped", type(exc).__name__)
+        emit_log(log_hook, "WARN", "Session save failed", f"{type(exc).__name__}: {exc}")
 
 
 def login_to_instagram_if_needed(page, context, profile_url: str, log_hook: Optional[LogHook] = None) -> bool:

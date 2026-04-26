@@ -33,6 +33,7 @@ const cancelBtn = document.getElementById("cancelBtn");
 const runStartBtn = document.getElementById("runStartBtn");
 const goBtn = document.getElementById("goBtn");
 const focusBrowserBtn = document.getElementById("focusBrowserBtn");
+const forceReadyBtn = document.getElementById("forceReadyBtn");
 const centerShowLogsBtn = document.getElementById("centerShowLogsBtn");
 const browserModeDescription = document.getElementById("browserModeDescription");
 const browserModeText = document.getElementById("browserModeText");
@@ -181,9 +182,12 @@ function statusTitleFor(state) {
         case "waiting_login":
             return `${platformLabel()} login required`;
         case "waiting_verification":
+        case "captcha":
             return `${platformLabel()} verification required`;
         case "ready":
             return "Ready for GO signal";
+        case "scraping":
+            return `Extracting ${platformLabel().toLowerCase()} data`;
         case "running":
             return `Extracting ${platformLabel().toLowerCase()} data`;
         case "awaiting_comments":
@@ -191,6 +195,7 @@ function statusTitleFor(state) {
         case "collecting_comments":
             return "Collecting and classifying comments";
         case "completed":
+        case "done":
             return "Completed";
         case "failed":
             return "Run failed";
@@ -202,6 +207,10 @@ function statusTitleFor(state) {
     }
 }
 
+function currentUiState(data) {
+    return data.state || data.status || "idle";
+}
+
 function browserSessionMessage(state) {
     switch (state) {
         case "loading_session":
@@ -209,12 +218,16 @@ function browserSessionMessage(state) {
         case "waiting_login":
             return `Waiting for manual ${platformLabel()} login in the opened browser.`;
         case "waiting_verification":
+        case "captcha":
             return `${platformLabel()} verification required. Complete it manually in Chromium and keep the window open.`;
         case "ready":
             return `${platformLabel()} page ready. Click GO / Start Extraction.`;
+        case "scraping":
+            return `${platformLabel()} extraction is running in the current browser session.`;
         case "running":
             return `${platformLabel()} extraction is running in the current browser session.`;
         case "completed":
+        case "done":
             return `${platformLabel()} extraction finished.`;
         case "failed":
             return `${platformLabel()} extraction failed. Check logs for details.`;
@@ -227,16 +240,17 @@ function browserSessionMessage(state) {
 }
 
 function gateMessage(data) {
-    if (data.canGo && data.status === "ready") {
+    const state = currentUiState(data);
+    if (data.canGo && state === "ready") {
         return "Ready. Click GO / Start Extraction.";
     }
-    if (data.status === "waiting_verification" || data.verificationRequired) {
+    if (state === "captcha" || data.verificationRequired) {
         return "Verification required.";
     }
-    if (data.status === "waiting_login" || data.loginRequired) {
+    if (state === "waiting_login" || data.loginRequired) {
         return "Page is not ready yet.";
     }
-    if (["preparing", "loading_session"].includes(data.status)) {
+    if (state === "preparing") {
         return "Page is not ready yet.";
     }
     return "Waiting for Run / Start.";
@@ -310,26 +324,29 @@ function appendLiveLog(log) {
 }
 
 function applyBrowserSessionState(data) {
+    const state = currentUiState(data);
     const browserMode = data.browserMode || "No browser session yet.";
     const browserUrl = data.browserUrl || data.currentPost || "";
     browserModeText.textContent = browserMode;
-    browserSessionStatusText.textContent = browserSessionMessage(data.status);
+    browserSessionStatusText.textContent = browserSessionMessage(state);
     browserSessionUrlText.textContent = formatDisplayUrl(browserUrl, 96);
     browserSessionUrlText.title = browserUrl || "";
     goStatusText.textContent = gateMessage(data);
-    browserModeDescription.textContent = platformConfig.browserSessionDescription || browserSessionMessage(data.status);
+    browserModeDescription.textContent = platformConfig.browserSessionDescription || browserSessionMessage(state);
 }
 
 function setButtonStates(data) {
-    const running = data.status === "running";
-    const started = !["idle", "completed", "failed", "cancelled", "stopped"].includes(data.status);
+    const state = currentUiState(data);
+    const running = state === "scraping" || data.status === "running";
+    const started = !["idle", "done", "completed", "failed", "cancelled", "stopped"].includes(state);
     const canFocus = Boolean(data.browserOpen);
     const canDownload = Boolean(data.downloadReady);
-    const canGoNow = Boolean(data.canGo && data.status === "ready");
+    const canGoNow = Boolean(data.canGo && state === "ready");
     const placeholder = isPlaceholderPlatform();
 
-    setButtonDisabled(runStartBtn, placeholder || running || data.status === "preparing");
+    setButtonDisabled(runStartBtn, placeholder || running || state === "preparing");
     setButtonDisabled(goBtn, placeholder || !canGoNow);
+    setButtonDisabled(forceReadyBtn, placeholder || !started || canGoNow || running);
     setButtonDisabled(focusBrowserBtn, placeholder || !canFocus);
     setButtonDisabled(cancelBtn, placeholder || !started);
     setButtonDisabled(downloadBtn, placeholder || !canDownload);
@@ -343,6 +360,7 @@ function setButtonStates(data) {
 
 function renderStatus(data) {
     lastStatus = data;
+    const state = currentUiState(data);
     const roundCurrent = Number(data.scrollRound || 0);
     const roundMax = Number(data.maxScrollRounds || 0);
     const progress = Number(data.progress || 0);
@@ -352,9 +370,9 @@ function renderStatus(data) {
     const errors = Number(data.errors || 0);
     const itemUrl = data.currentPost || data.browserUrl || "";
 
-    statusTitle.textContent = statusTitleFor(data.status);
-    statusBadge.textContent = data.status || "idle";
-    statusBadge.className = `status-badge ${data.status || "idle"}`;
+    statusTitle.textContent = statusTitleFor(state);
+    statusBadge.textContent = state || "idle";
+    statusBadge.className = `status-badge ${state || "idle"}`;
     scrollRoundText.textContent = `Round ${roundCurrent} / ${roundMax}`;
     currentPostText.textContent = formatDisplayUrl(itemUrl);
     currentPostText.title = itemUrl || "";
@@ -555,6 +573,16 @@ async function focusBrowser() {
     formMessage.className = "form-message info";
 }
 
+async function forceReady() {
+    if (isPlaceholderPlatform()) {
+        return;
+    }
+    const data = await fetchJson(apiUrl("/force-ready"), { method: "POST" });
+    formMessage.textContent = data.message || "Force Ready enabled. Click GO when your target page is visible.";
+    formMessage.className = "form-message info";
+    await refreshStatus();
+}
+
 async function cancelScrape() {
     if (isPlaceholderPlatform()) {
         return;
@@ -641,6 +669,15 @@ goBtn?.addEventListener("click", async () => {
 focusBrowserBtn?.addEventListener("click", async () => {
     try {
         await focusBrowser();
+    } catch (error) {
+        formMessage.textContent = error.message;
+        formMessage.className = "form-message error";
+    }
+});
+
+forceReadyBtn?.addEventListener("click", async () => {
+    try {
+        await forceReady();
     } catch (error) {
         formMessage.textContent = error.message;
         formMessage.className = "form-message error";
