@@ -1581,7 +1581,14 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
             broadcast_dashboard_event("job_completed", JOB.snapshot(include_logs=False))
             JOB.update(status="completed", active_task="Completed", progress=100, finished_at=time.time(), ready_to_scrape=False, login_required=False, verification_required=False, awaiting_comments=False)
     except ScrapeCancelled as exc:
-        JOB.update(status="stopped", active_task="Stopped", finished_at=time.time(), ready_to_scrape=False, login_required=False, verification_required=False)
+        JOB.update(
+            status="cancelled",
+            active_task="Cancelled",
+            finished_at=time.time(),
+            ready_to_scrape=False,
+            login_required=False,
+            verification_required=False,
+        )
         JOB.add_log("WARN", "Scrape cancelled", str(exc))
         if page is not None:
             emit_preview_frame(page, "Scrape cancelled", force=True)

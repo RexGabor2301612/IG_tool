@@ -243,18 +243,21 @@ class ScrapeJobState:
         with self.lock:
             return self.cancel_requested
 
-    def request_go(self) -> bool:
+    def request_go(self) -> tuple[bool, str]:
         with self.lock:
-            if (
-                self.status != "ready"
-                or self.go_requested
-                or not self.browser_session_created
-                or not self.page_ready
-                or not self.ready_to_scrape
-            ):
-                return False
+            if self.status == "waiting_verification" or self.verification_required:
+                return False, "Verification required."
+            if self.status in {"preparing", "loading_session", "waiting_login"}:
+                return False, "Page is not ready yet."
+            if self.status != "ready":
+                return False, "Page is not ready yet."
+            if self.go_requested:
+                return False, "GO was already received."
+            if not self.browser_session_created or not self.page_ready or not self.ready_to_scrape:
+                return False, "Page is not ready yet."
+
             self.go_requested = True
-            return True
+            return True, ""
 
     def should_go(self) -> bool:
         with self.lock:
@@ -578,7 +581,7 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
         current_post=current_page_url(page, target_url),
     )
     JOB.add_log("WARN", "Login required", "Facebook login is required before loading posts or comments.")
-    JOB.add_log("WARN", "Waiting for manual login", message)
+    JOB.add_log("INFO", "Waiting for manual login", "Complete login in the opened browser.")
     broadcast_dashboard_event("login_required", {"message": message, "url": current_page_url(page, target_url)})
 
     if not using_local_browser_window():
@@ -685,7 +688,7 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
             else:
                 JOB.add_log("INFO", "Public content ready", "The target page appears publicly accessible without a saved authenticated session.")
             if waiting_for_go:
-                JOB.add_log("INFO", "Ready for GO signal", "Login completed. Click GO / START EXTRACTION to continue.")
+                JOB.add_log("INFO", "Ready for GO signal", "Click GO / START EXTRACTION.")
             broadcast_dashboard_event("login_completed", {"message": "Facebook login completed. Page ready.", "url": current_page_url(page, target_url)})
             return
 
@@ -751,7 +754,7 @@ def wait_for_user_login(page, context, target_url: str, *, waiting_for_go: bool)
 
 def wait_for_go_signal(page, target_url: str) -> None:
     mark_page_ready(page, target_url, waiting_for_go=True)
-    JOB.add_log("INFO", "Ready for GO signal", "Page ready. Click GO / START EXTRACTION to begin Facebook scrolling and extraction.")
+    JOB.add_log("INFO", "Ready for GO signal", "Click GO / START EXTRACTION.")
 
     while not JOB.should_go():
         if JOB.should_cancel():
@@ -767,8 +770,8 @@ def wait_for_go_signal(page, target_url: str) -> None:
         login_required=False,
         verification_required=False,
     )
-    JOB.add_log("SUCCESS", "GO signal received", "Starting Facebook scrolling and extraction.")
-    JOB.add_log("INFO", "Starting extraction", "Beginning Facebook scroll/load collection and metric extraction.")
+    JOB.add_log("SUCCESS", "GO received", "Starting scroll.")
+    JOB.add_log("INFO", "Starting scroll", "Scrolling before collecting links.")
 
 
 def ensure_login_ready(page, context, target_url: str, active_task: str, delay_reason: str = "") -> bool:
@@ -786,7 +789,8 @@ def ensure_login_ready(page, context, target_url: str, active_task: str, delay_r
 
 def collect_post_links_with_progress(page, config: WebScrapeConfig) -> list[str]:
     JOB.update(active_task="Loading Facebook posts", total_scroll_rounds=config.scroll_rounds)
-    JOB.add_log("INFO", "Starting scroll", "Beginning Facebook scroll collection.")
+    JOB.add_log("INFO", "Starting scroll", "Scrolling before collecting links.")
+    JOB.add_log("INFO", "Collecting links", "Collecting post links after scroll.")
 
     def progress_hook(scroll_round: int, total_rounds: int, posts_found: int) -> None:
         progress_value = 0 if scroll_round <= 0 else min(20, round(20 * scroll_round / max(total_rounds, 1)))
@@ -826,12 +830,12 @@ def wait_until_page_ready_or_login_completed(page, context, target_url: str) -> 
         browser_url=target_url,
         current_post=target_url,
     )
-    JOB.add_log("INFO", "Checking saved session", "Checking whether a Playwright storage_state file is available for Facebook.")
+    JOB.add_log("INFO", "Checking saved session", "Loading storage_state if available.")
     if saved_session_path is not None:
         JOB.add_log("INFO", "Saved session found", str(saved_session_path))
     else:
         JOB.add_log("INFO", "Saved session missing", "No saved Facebook storage_state file was found. Manual login may be required.")
-    JOB.add_log("INFO", "Browser opened", "Opened the Facebook browser session.")
+    JOB.add_log("INFO", "Browser opened", "Using one browser/context/page for this job.")
     JOB.add_log("INFO", "Opened target", target_url)
     page.goto(target_url, wait_until="domcontentloaded", timeout=scraper.POST_GOTO_TIMEOUT)
     scraper.apply_local_page_preferences(page)
@@ -863,26 +867,28 @@ def wait_until_page_ready_or_login_completed(page, context, target_url: str) -> 
             mark_page_ready(page, target_url, waiting_for_go=True)
             JOB.add_log("SUCCESS", "Saved session valid", "Facebook login completed and storage state is ready to reuse.")
             JOB.add_log("SUCCESS", "Facebook page ready", "Target Facebook content is visible.")
-            JOB.add_log("INFO", "Ready for GO signal", "Click GO / START EXTRACTION to continue.")
+            JOB.add_log("INFO", "Ready for GO signal", "Click GO / START EXTRACTION.")
             return
         wait_for_user_login(page, context, target_url, waiting_for_go=True)
         return
 
     if session_state["state"] == "ready":
-        mark_page_ready(page, target_url, waiting_for_go=True)
-        if session_state.get("cookiesPresent"):
-            JOB.add_log("SUCCESS", "Session cookies detected", "Facebook authentication cookies are present and the session can be reused.")
-        else:
-            JOB.add_log("INFO", "Public content ready", "The target Facebook page appears accessible without an authenticated session.")
-        JOB.add_log("SUCCESS", "Facebook page ready", "Facebook page/feed is visible and ready.")
-        JOB.add_log("INFO", "Ready for GO signal", "Click GO / START EXTRACTION to continue.")
-        return
+        ready, reason = scraper.facebook_strong_ready_signal(page, target_url)
+        if ready:
+            cookies_present = scraper.has_authenticated_session(context)
+            if cookies_present:
+                scraper.save_storage_state(context, JOB.add_log)
+
+            mark_page_ready(page, target_url, waiting_for_go=True)
+            JOB.add_log("SUCCESS", "Page readiness check passed", reason)
+            JOB.add_log("INFO", "Ready for GO signal", "Click GO / START EXTRACTION.")
+            return
 
     if scraper.auto_login_if_needed(page, context, target_url, log_hook=JOB.add_log):
         mark_page_ready(page, target_url, waiting_for_go=True)
         JOB.add_log("SUCCESS", "Login completed", "Saved Facebook session restored successfully.")
         JOB.add_log("SUCCESS", "Facebook page ready", "Target Facebook content is visible.")
-        JOB.add_log("INFO", "Ready for GO signal", "Click GO / START EXTRACTION to continue.")
+        JOB.add_log("INFO", "Ready for GO signal", "Click GO / START EXTRACTION.")
         return
 
     JOB.update(status="loading_session", active_task="Waiting for Facebook page")
@@ -902,7 +908,7 @@ def wait_until_page_ready_or_login_completed(page, context, target_url: str) -> 
             else:
                 JOB.add_log("INFO", "Public content ready", "The target Facebook page appears publicly accessible.")
             JOB.add_log("SUCCESS", "Facebook page ready", "Facebook page/feed is visible and ready.")
-            JOB.add_log("INFO", "Ready for GO signal", "Click GO / START EXTRACTION to continue.")
+            JOB.add_log("INFO", "Ready for GO signal", "Click GO / START EXTRACTION.")
             return
         if session_state["state"] == "verification_required":
             JOB.add_log("WARN", "Verification required", session_state["reason"] or "Facebook verification is required.")
@@ -976,7 +982,7 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
             JOB.update(browser_session_created=True, browser_url=current_page_url(page, config.target_url))
             JOB.add_log("INFO", "Browser session created", "Created one Playwright browser/context/page for the Facebook job.")
             saved_session_path = scraper.get_storage_state_path(require_exists=True)
-            JOB.add_log("INFO", "Checking saved session", "Looking for a Facebook Playwright storage_state file before continuing.")
+            JOB.add_log("INFO", "Checking saved session", "Loading storage_state if available.")
             if saved_session_path is not None:
                 JOB.add_log("INFO", "Saved session found", str(saved_session_path))
             else:
@@ -990,17 +996,9 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                     page.bring_to_front()
                 except Exception:
                     pass
-                JOB.add_log(
-                    "INFO",
-                    "Browser opened",
-                    "A real Chromium browser window has been opened. Log in there if Facebook asks, then return here and click GO / START EXTRACTION.",
-                )
+                JOB.add_log("INFO", "Browser opened", "Using one browser/context/page for this job.")
             else:
-                JOB.add_log(
-                    "INFO",
-                    "Browser opened",
-                    "Headless Facebook browser session started. This environment cannot open a local browser window.",
-                )
+                JOB.add_log("INFO", "Browser opened", "Using one browser/context/page for this job.")
 
             wait_until_page_ready_or_login_completed(page, context, config.target_url)
             wait_for_go_signal(page, config.target_url)
@@ -1036,7 +1034,7 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                     posts_processed=index - 1,
                     progress=20 + round(70 * (index - 1) / max(len(links), 1)),
                 )
-                JOB.add_log("INFO", f"Processing {index}/{len(links)}", link)
+                JOB.add_log("INFO", "Extracting metrics", link)
 
                 try:
                     started = time.perf_counter()
@@ -1388,24 +1386,13 @@ def cancel_scrape():
 
 @app.post("/api/go")
 def go_signal():
-    snapshot = JOB.snapshot()
-    if not snapshot.get("browserSessionCreated"):
-        JOB.add_log("WARN", "Blocked GO", "GO was rejected because no browser session is active.")
-        return jsonify({"ok": False, "errors": ["No browser session is active. Click Run / Start first."], "status": snapshot}), 409
-    if snapshot.get("status") in {"waiting_login", "waiting_verification"} or snapshot.get("verificationRequired"):
-        JOB.add_log("WARN", "Blocked GO", "GO was rejected because Facebook verification is still required.")
-        return jsonify({"ok": False, "errors": ["Complete Facebook verification first."], "status": snapshot}), 409
-    if snapshot.get("loginRequired") or not snapshot.get("pageReady"):
-        JOB.add_log("WARN", "Blocked GO", "GO was rejected because Facebook login/page readiness is not complete yet.")
-        return jsonify({"ok": False, "errors": ["Please finish Facebook login first."], "status": snapshot}), 409
-    if snapshot.get("status") != "ready":
-        JOB.add_log("WARN", "Blocked GO", f"GO was rejected because the job state is {snapshot.get('status')}.")
-        return jsonify({"ok": False, "errors": ["The Facebook extractor is not ready for GO yet."], "status": snapshot}), 409
-    if not JOB.request_go():
-        return jsonify({"ok": False, "errors": ["The Facebook extractor is not waiting for GO."], "status": JOB.snapshot()}), 409
+    ok, reason = JOB.request_go()
+    if not ok:
+        JOB.add_log("WARN", "GO rejected", reason)
+        return jsonify({"ok": False, "errors": [reason], "status": JOB.snapshot(include_logs=False)}), 409
 
-    JOB.add_log("INFO", "GO signal received", "Reusing the existing browser session and starting Facebook extraction.")
-    return jsonify({"ok": True, "status": JOB.snapshot()})
+    JOB.add_log("SUCCESS", "GO received", "Starting scroll.")
+    return jsonify({"ok": True, "status": JOB.snapshot(include_logs=False)})
 
 
 @app.post("/api/focus-browser")

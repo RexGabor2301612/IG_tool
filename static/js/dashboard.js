@@ -227,17 +227,17 @@ function browserSessionMessage(state) {
 }
 
 function gateMessage(data) {
-    if (data.canGo) {
+    if (data.canGo && data.status === "ready") {
         return "Ready. Click GO / Start Extraction.";
     }
-    if (data.status === "waiting_verification") {
-        return `Complete ${platformLabel()} verification first.`;
+    if (data.status === "waiting_verification" || data.verificationRequired) {
+        return "Verification required.";
     }
-    if (data.status === "waiting_login") {
-        return `Complete ${platformLabel()} login first.`;
+    if (data.status === "waiting_login" || data.loginRequired) {
+        return "Page is not ready yet.";
     }
-    if (data.status === "loading_session") {
-        return "Checking saved session.";
+    if (["preparing", "loading_session"].includes(data.status)) {
+        return "Page is not ready yet.";
     }
     return "Waiting for Run / Start.";
 }
@@ -325,10 +325,11 @@ function setButtonStates(data) {
     const started = !["idle", "completed", "failed", "cancelled", "stopped"].includes(data.status);
     const canFocus = Boolean(data.browserOpen);
     const canDownload = Boolean(data.downloadReady);
+    const canGoNow = Boolean(data.canGo && data.status === "ready");
     const placeholder = isPlaceholderPlatform();
 
     setButtonDisabled(runStartBtn, placeholder || running || data.status === "preparing");
-    setButtonDisabled(goBtn, placeholder || !data.canGo);
+    setButtonDisabled(goBtn, placeholder || !canGoNow);
     setButtonDisabled(focusBrowserBtn, placeholder || !canFocus);
     setButtonDisabled(cancelBtn, placeholder || !started);
     setButtonDisabled(downloadBtn, placeholder || !canDownload);

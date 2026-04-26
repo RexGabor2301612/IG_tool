@@ -595,22 +595,43 @@ def detect_login_gate(page) -> tuple[bool, str]:
     return False, ""
 
 
-def page_ready_for_collection(page, target_url: str = "") -> bool:
-    login_required, _ = detect_login_gate(page)
+def facebook_strong_ready_signal(page, target_url: str = "") -> tuple[bool, str]:
+    checkpoint_required, checkpoint_reason = detect_checkpoint_or_verification(page)
+    if checkpoint_required:
+        return False, checkpoint_reason
+
+    login_required, login_reason = detect_login_gate(page)
     if login_required:
-        return False
-    if visible_post_anchor_count(page) > 0:
-        return True
-    if wait_for_selector(page, FEED_READY_SELECTOR, 800):
-        return True
-    current_url = ""
+        return False, login_reason
+
+    signals = [
+        (POST_LINK_SELECTOR, "post links visible"),
+        (FEED_READY_SELECTOR, "feed/posts container visible"),
+        (PAGE_SHELL_READY_SELECTOR, "page shell/profile content visible"),
+        ("div[role='navigation']", "navigation bar visible"),
+        ("div[role='main']", "main content visible"),
+        ("svg[aria-label='Your profile'], [aria-label='Your profile']", "user avatar/nav visible"),
+    ]
+
+    for selector, reason in signals:
+        if wait_for_selector(page, selector, 700):
+            return True, reason
+
     try:
         current_url = page.url or ""
     except Exception:
         current_url = ""
-    if target_url and current_url_matches_target(current_url, target_url) and page_shell_visible(page, 800):
-        return True
-    return False
+
+    if target_url and current_url_matches_target(current_url, target_url):
+        if not wait_for_selector(page, LOGIN_FORM_SELECTOR, 300):
+            return True, "target URL loaded and login form is gone"
+
+    return False, "Facebook page is not ready yet."
+
+
+def page_ready_for_collection(page, target_url: str = "") -> bool:
+    ready, _ = facebook_strong_ready_signal(page, target_url)
+    return ready
 
 
 def validate_session(page, context=None, target_url: str = "") -> dict[str, Any]:
@@ -632,10 +653,11 @@ def validate_session(page, context=None, target_url: str = "") -> dict[str, Any]
             "cookiesPresent": bool(context and has_authenticated_session(context)),
         }
 
-    if page_ready_for_collection(page, target_url):
+    ready, ready_reason = facebook_strong_ready_signal(page, target_url)
+    if ready:
         return {
             "state": "ready",
-            "reason": "Facebook page or feed content is visible.",
+            "reason": f"Facebook readiness check passed: {ready_reason}.",
             "url": getattr(page, "url", target_url) or target_url,
             "cookiesPresent": bool(context and has_authenticated_session(context)),
         }
