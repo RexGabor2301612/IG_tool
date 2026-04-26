@@ -1077,6 +1077,7 @@ def collect_post_links(
 
         for strategy in strategies:
             strategy_used = strategy
+            emit_log(log_hook, "INFO", f"Scroll {round_index}", f"Trying {strategy}.")
             apply_scroll_strategy(page, strategy)
             page.wait_for_timeout(120)
             after_state = wait_for_scroll_growth(page, before_state, SCROLL_WAIT_TIMEOUT)
@@ -1095,6 +1096,8 @@ def collect_post_links(
             ):
                 break
             page.wait_for_timeout(PROFILE_RETRY_MS)
+            if len(links) == before_count:
+                page.wait_for_timeout(2500)
 
         new_links = len(links) - before_count
         article_growth = max(0, article_count_after - before_state.get("articleCount", 0))
@@ -1138,6 +1141,9 @@ def collect_post_links(
     if diagnostics is not None:
         diagnostics["stopReason"] = stop_reason
         diagnostics["totalLinks"] = len(links)
+
+    if not links:
+        emit_log(log_hook, "WARN", "No links collected", "No Facebook post links were found after scrolling. Stopping gracefully.")
 
     emit_log(log_hook, "INFO", "Link collection stop", stop_reason)
     return list(links.keys())

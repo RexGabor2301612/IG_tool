@@ -197,6 +197,7 @@ class ScrapeJobState:
         self.logs: list[dict[str, str]] = []
         self.cancel_requested = False
         self.go_requested = False
+        self.go_event = threading.Event()
         self.browser_session_created = False
         self.page_ready = False
         self.login_required = False
@@ -257,6 +258,7 @@ class ScrapeJobState:
                 return False, "Page is not ready yet."
 
             self.go_requested = True
+            self.go_event.set()
             return True, ""
 
     def should_go(self) -> bool:
@@ -296,6 +298,7 @@ class ScrapeJobState:
                 "waiting_verification": "captcha",
                 "captcha": "captcha",
                 "ready": "ready",
+                "scraping": "scraping",
                 "running": "scraping",
                 "completed": "done",
             }
@@ -774,15 +777,14 @@ def wait_for_go_signal(page, target_url: str) -> None:
     mark_page_ready(page, target_url, waiting_for_go=True)
     JOB.add_log("INFO", "Ready for GO signal", "Click GO / START EXTRACTION.")
 
-    while not JOB.should_go():
+    while not JOB.go_event.wait(timeout=0.2):
         if JOB.should_cancel():
             raise ScrapeCancelled("Cancelled while waiting for GO signal.")
         drain_control_commands(page)
         sync_browser_url(page, target_url)
-        time.sleep(0.2)
 
     JOB.update(
-        status="running",
+        status="scraping",
         active_task="Starting Facebook collection",
         ready_to_scrape=False,
         login_required=False,
@@ -1414,6 +1416,7 @@ def go_signal():
         JOB.add_log("WARN", "GO rejected", reason)
         return jsonify({"ok": False, "errors": [reason], "status": JOB.snapshot(include_logs=False)}), 409
 
+    JOB.update(status="scraping", active_task="Starting Facebook collection", ready_to_scrape=False)
     JOB.add_log("SUCCESS", "GO received", "Starting scroll.")
     return jsonify({"ok": True, "status": JOB.snapshot(include_logs=False)})
 
