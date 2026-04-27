@@ -20,6 +20,17 @@ from modules.comment_collector_ig import collect_all_comments_ig
 from modules.excel_exporter import save_posts_excel, add_comments_sheet, update_sentiment_counts
 from modules.sentiment_classifier import classify_comments
 
+# PRODUCTION SYSTEM: Core modules MANDATORY - no fallback allowed
+from core.logging.logger import ProductionLogger, LogLevel, LogEntry
+from core.logging.streaming import LogStreamBroadcaster
+from core.state.machine import ScrapeState, ScrapeJobState as CoreScrapeJobState
+from core.session.manager import PlaywrightSessionManager, SessionConfig
+from core.extraction.extractor import DataExtractor, ExtractionConfig, ExtractedPost
+from core.extraction.selectors import Platform, SelectorFactory
+from core.etl.etl_engine import ETLPipeline, DataBuffer
+
+print("✅ PRODUCTION CORE MODULES IMPORTED SUCCESSFULLY")
+
 
 app = Flask(__name__)
 sock = Sock(app)
@@ -220,6 +231,21 @@ class ScrapeJobState:
             }
             self.logs.insert(0, entry)
             self.logs = self.logs[:250]
+        
+        # PRODUCTION: Always log to ProductionLogger - MANDATORY
+        try:
+            log_level_map = {
+                "INFO": LogLevel.INFO,
+                "SUCCESS": LogLevel.SUCCESS,
+                "WARN": LogLevel.WARN,
+                "ERROR": LogLevel.ERROR,
+            }
+            log_level = log_level_map.get(level.upper(), LogLevel.INFO)
+            PRODUCTION_LOGGER.log(log_level, action, details)
+        except Exception as logger_exc:
+            print(f"❌ CRITICAL: ProductionLogger.log() failed: {logger_exc}")
+            raise  # FAIL FAST - logging is mandatory
+        
         broadcast_dashboard_event("log", entry)
         broadcast_job_snapshot(include_logs=False)
 
@@ -368,6 +394,23 @@ LOGIN_READY_TIMEOUT = 180000
 HEADLESS_PROFILE_READY_TIMEOUT = 15000
 PREVIEW_INTERVAL_SECONDS = 0.8
 PREVIEW_JPEG_QUALITY = 55
+
+# PRODUCTION SYSTEM: Initialize core modules - MANDATORY
+try:
+    PRODUCTION_LOGGER = ProductionLogger(persistence_dir=Path("."))
+    SESSION_MANAGER = PlaywrightSessionManager(sessions_dir=Path("storage_states"))
+    ETL_PIPELINE = ETLPipeline(output_dir=Path("."), platform="instagram")
+    DATA_EXTRACTOR = DataExtractor()
+    print("✅ PRODUCTION SYSTEM ACTIVE - No fallback mode")
+    print("  ✓ ProductionLogger: logs to logs.db")
+    print("  ✓ PlaywrightSessionManager: sessions in storage_states/")
+    print("  ✓ DataExtractor: active post extraction")
+    print("  ✓ ETLPipeline: active processing and export")
+except Exception as e:
+    print("❌ CRITICAL: Production system initialization failed")
+    print(f"   Error: {e}")
+    print("   System cannot continue without core modules")
+    raise
 
 
 def using_local_browser_window() -> bool:
@@ -660,9 +703,14 @@ def validate_request_payload(payload: dict[str, Any]) -> tuple[Optional[WebScrap
     errors: list[str] = []
     overwrite_required = False
 
+    # Log validation start
+    PRODUCTION_LOGGER.log(LogLevel.INFO, "Validation started", "User submitted Instagram scrape configuration")
+
     profile_url = scraper.normalize_instagram_profile_url(str(payload.get("instagramLink", "")))
     if profile_url is None:
-        errors.append("Enter a valid Instagram profile link, for example https://www.instagram.com/username/.")
+        error_msg = "Enter a valid Instagram profile link, for example https://www.instagram.com/username/."
+        errors.append(error_msg)
+        PRODUCTION_LOGGER.log(LogLevel.WARN, "Validation failed: Invalid profile URL", str(payload.get("instagramLink", "")))
 
     raw_scroll_rounds = str(payload.get("scrollRounds", "")).strip()
     if not raw_scroll_rounds:
@@ -699,7 +747,12 @@ def validate_request_payload(payload: dict[str, Any]) -> tuple[Optional[WebScrap
         errors.append(f"{output_file} already exists. Confirm overwrite or enter a new filename.")
 
     if errors:
+        # Log validation errors
+        PRODUCTION_LOGGER.log(LogLevel.ERROR, "Validation failed", f"{len(errors)} error(s): {'; '.join(errors[:3])}")
         return None, errors, overwrite_required
+
+    # Log successful validation
+    PRODUCTION_LOGGER.log(LogLevel.SUCCESS, "Validation passed", f"Profile: {profile_url}, Rounds: {scroll_rounds}, Output: {output_file}")
 
     return (
         WebScrapeConfig(
@@ -1310,14 +1363,21 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
     page = None
     try:
         with sync_playwright() as p:
-            browser, context = scraper.launch_browser(p)
+            # PRODUCTION: Use PlaywrightSessionManager ONLY - strict, no fallback
+            try:
+                JOB.add_log("INFO", "Browser session initializing", "Using PlaywrightSessionManager")
+                browser, context = SESSION_MANAGER.init_browser(p, platform="instagram")
+            except Exception as sm_exc:
+                JOB.add_log("ERROR", "SessionManager FAILED - SYSTEM STOPPING", str(sm_exc))
+                raise  # FAIL FAST - no fallback allowed
+            
             context.route("**/*", scraper.route_nonessential_resources)
 
             page = context.new_page()
             JOB.update(browser_session_created=True, browser_url=current_page_url(page, config.profile_url))
-            JOB.add_log("INFO", "Browser session created", "Created one Playwright browser/context/page session for this job.")
+            JOB.add_log("INFO", "Browser session created", "Playwright browser/context/page ready")
             saved_session_path = scraper.get_storage_state_path(require_exists=True)
-            JOB.add_log("INFO", "Checking saved session", "Looking for an Instagram Playwright storage_state file before continuing.")
+            JOB.add_log("INFO", "Checking saved session", "Looking for storage_state file")
             if saved_session_path is not None:
                 JOB.add_log("INFO", "Saved session found", str(saved_session_path))
             else:
@@ -1436,16 +1496,35 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
                     seen_in_range_post = True
                     snapshot = JOB.snapshot()
                     JOB.update(posts_in_range=snapshot["postsInRange"] + 1)
-                    post = scraper.extract_metrics_from_loaded_post(
-                        page,
-                        link,
-                        raw_date,
-                        date_obj,
-                        post_type,
-                        log_hook=JOB.add_log,
-                    )
+                    
+                    # PRODUCTION: Use DataExtractor ONLY - strict, no fallback
+                    try:
+                        extracted = DATA_EXTRACTOR.extract(page, link, Platform.INSTAGRAM)
+                        # Convert ExtractedPost to PostData for compatibility
+                        from instagram_to_excel import PostData as IGPostData
+                        post = IGPostData(
+                            url=extracted.url,
+                            post_type=post_type,
+                            post_date_raw=raw_date,
+                            post_date_obj=date_obj,
+                            likes=extracted.likes,
+                            comments=extracted.comments,
+                            shares=extracted.shares,
+                        )
+                        JOB.add_log("INFO", "Metrics extracted", f"POST: {link[:80]}")
+                    except Exception as ext_exc:
+                        JOB.add_log("ERROR", "DataExtractor FAILED - SYSTEM STOPPING", str(ext_exc))
+                        raise  # FAIL FAST - no fallback allowed
+                    
                     post_elapsed = time.perf_counter() - post_started
                     all_posts.append(post)
+                    
+                    # PRODUCTION: Incrementally save to SQLite during collection - MANDATORY
+                    try:
+                        ETL_PIPELINE.add_post(post, url=link)
+                    except Exception as etl_add_exc:
+                        JOB.add_log("ERROR", "ETLPipeline.add_post FAILED", str(etl_add_exc))
+                        raise  # FAIL FAST - incremental save is mandatory
 
                     if post.post_date_obj is not None and not target_date_reached and post.post_date_obj.date() <= config.start_date.date():
                         target_date_reached = True
@@ -1512,46 +1591,28 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
             if removed_count:
                 JOB.add_log("INFO", "Date filter applied", f"Filtered out {removed_count} posts outside selected coverage.")
 
-            JOB.update(active_task="Saving Excel file", progress=95)
+            JOB.update(active_task="Processing with ETL pipeline", progress=92)
             coverage_label = scraper.format_date_coverage(config.start_date, config.end_date)
-            if filtered_posts:
-                scraper.save_grouped_excel(
-                    filtered_posts,
-                    config.output_file,
-                    coverage_label,
-                )
-            else:
-                empty_reason = (
-                    "No collected posts fell within the selected date coverage after validating post dates."
-                )
-                scraper.save_empty_result_excel(
-                    config.output_file,
-                    coverage_label,
-                    total_links_collected=len(links),
-                    oldest_detected=oldest_post_seen,
-                    newest_detected=newest_post_seen,
-                    reason=empty_reason,
-                )
-                JOB.add_log("WARN", "No posts matched range", empty_reason)
-            JOB.add_log("SUCCESS", "Excel saved", config.output_file)
-            emit_preview_frame(page, "Excel saved", force=True)
-
-            # ------------------------------------------------------------------
-            # Phase 8 — Save using new unified exporter format
-            # ------------------------------------------------------------------
+            
+            # PRODUCTION: Use ETLPipeline ONLY - strict, no fallback
             try:
-                from urllib.parse import urlparse as _urlparse
-                page_name = _urlparse(config.profile_url).path.strip("/").split("/")[0] or "Instagram"
-                save_posts_excel(
-                    filtered_posts,
-                    config.output_file,
-                    coverage_label,
-                    page_name,
-                    "instagram",
+                JOB.add_log("INFO", "ETL pipeline starting", "Processing posts...")
+                result = ETL_PIPELINE.process(
+                    posts=filtered_posts,
+                    output_file=config.output_file,
+                    coverage_label=coverage_label,
+                    platform="instagram",
                 )
-                JOB.add_log("INFO", "Unified Excel format applied", config.output_file)
-            except Exception as _xlsx_exc:
-                JOB.add_log("WARN", "Unified Excel export skipped", str(_xlsx_exc))
+                if not result["success"]:
+                    raise Exception(f"ETL processing failed: {result.get('error', 'Unknown error')}")
+                
+                JOB.add_log("SUCCESS", "ETL pipeline completed", f"Processed: {result.get('posts_processed', 0)}, Duplicates: {result.get('duplicates_removed', 0)}")
+            except Exception as etl_exc:
+                JOB.add_log("ERROR", "ETL Pipeline FAILED - SYSTEM STOPPING", str(etl_exc))
+                raise  # FAIL FAST - no fallback allowed
+            
+            JOB.add_log("SUCCESS", "Excel exported", config.output_file)
+            emit_preview_frame(page, "Excel saved", force=True)
 
             # Store post URLs for comment collection
             with JOB.lock:
@@ -1629,16 +1690,21 @@ def run_scrape_job(config: WebScrapeConfig) -> None:
         if page is not None:
             emit_preview_frame(page, "Scrape failed", force=True)
     finally:
-        if context is not None:
+        # PRODUCTION: Use SessionManager to close and auto-save session - MANDATORY
+        try:
+            SESSION_MANAGER.close()
+            JOB.add_log("INFO", "Session saved", "Browser session auto-saved for reuse")
+        except Exception as sm_close_exc:
+            JOB.add_log("ERROR", "Session close FAILED", str(sm_close_exc))
+            # Still try manual close as last resort
             try:
-                context.close()
+                if context is not None:
+                    context.close()
+                if browser is not None:
+                    browser.close()
             except Exception:
                 pass
-        if browser is not None:
-            try:
-                browser.close()
-            except Exception:
-                pass
+        
         JOB.update(browser_session_created=False, profile_ready=False, login_required=False, verification_required=False, ready_to_scrape=False, browser_url="")
         broadcast_job_snapshot(include_logs=False)
 
