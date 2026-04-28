@@ -384,6 +384,12 @@ class JobController:
             self._broadcast_snapshot()
 
             diagnostics: dict[str, Any] = {}
+            unavailable_metrics = 0
+            if hasattr(self.adapter, "set_target_url"):
+                try:
+                    self.adapter.set_target_url(config.target_url)
+                except Exception:
+                    pass
             while True:
                 try:
                     links = self.adapter.collect_post_links(
@@ -424,7 +430,11 @@ class JobController:
 
                 try:
                     post = self.adapter.extract_post(page, link, config.collection_type, log_hook=self._log_hook)
-                    post_date = getattr(post, "post_date_obj", None)
+                    if isinstance(post, dict):
+                        unavailable_metrics += int(post.get("unavailable_metrics") or 0)
+                        post_date = post.get("post_date_obj")
+                    else:
+                        post_date = getattr(post, "post_date_obj", None)
                     if post_date and (post_date < config.start_date or (config.end_date and post_date > config.end_date)):
                         with self.lock:
                             self.skipped_posts += 1
@@ -451,6 +461,22 @@ class JobController:
 
             self._flush_buffer()
             coverage_label = self.adapter.format_date_coverage(config.start_date, config.end_date)
+            if hasattr(self.adapter, "set_run_diagnostics"):
+                try:
+                    self.adapter.set_run_diagnostics(
+                        {
+                            "Total collected links": len(links),
+                            "Total processed": self.posts_processed,
+                            "Successful extractions": self.posts_success,
+                            "Skipped posts": self.skipped_posts,
+                            "Unavailable metrics": unavailable_metrics,
+                            "Errors": self.errors,
+                            "Viewport": page.viewport_size or {},
+                            "Page readiness": self.status,
+                        }
+                    )
+                except Exception:
+                    pass
             self.adapter.export_excel(posts, config.output_file, coverage_label, config.collection_type)
             with self.lock:
                 self.progress = 100

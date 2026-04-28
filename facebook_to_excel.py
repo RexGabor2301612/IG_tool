@@ -73,7 +73,7 @@ BASE_POST_DELAY = 0.15
 SLOW_SCROLL_SECONDS = 2.0
 SLOW_POST_SECONDS = 4.0
 COMMENT_LOAD_WAIT_MS = 900
-COMMENT_EXPANSION_ROUNDS = 8
+COMMENT_EXPANSION_ROUNDS = 4
 
 POST_LINK_SELECTOR = (
     "a[href*='/posts/'], "
@@ -240,7 +240,7 @@ def has_login_credentials() -> bool:
 
 def load_or_create_context(browser):
     context_options = {
-        "viewport": {"width": 1366, "height": 900},
+        "viewport": {"width": 1920, "height": 1080},
         "locale": "en-US",
         "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     }
@@ -629,7 +629,12 @@ def facebook_strong_ready_signal(page, target_url: str = "") -> tuple[bool, str]
 
     for selector, reason in signals:
         if wait_for_selector(page, selector, 700):
-            return True, reason
+            try:
+                state = get_scroll_state(page)
+                if state.get("visiblePosts", 0) > 0:
+                    return True, reason
+            except Exception:
+                return True, reason
 
     try:
         current_url = page.url or ""
@@ -787,7 +792,7 @@ def launch_browser(playwright):
         user_data_dir.mkdir(parents=True, exist_ok=True)
         persistent_options = {
             "headless": False,
-            "viewport": None,
+            "viewport": {"width": 1920, "height": 1080},
             "locale": "en-US",
             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "args": launch_options["args"],
@@ -1630,22 +1635,14 @@ def select_all_comments_mode(page, target_url: str = "", log_hook: Optional[LogH
             return "";
         }
     """
-    for _ in range(3):
-        try:
-            result = (page.evaluate(script, arg=target_url) or "").strip()
-        except Exception:
-            result = ""
-        if not result:
-            return
-        page.wait_for_timeout(COMMENT_LOAD_WAIT_MS)
-        if result.lower().startswith("all comments"):
-            emit_log(log_hook, "INFO", "All comments", result)
-            return
-        if result.lower().startswith("opened"):
-            emit_log(log_hook, "INFO", "All comments", result)
-            continue
-        emit_log(log_hook, "INFO", "All comments", result)
+    try:
+        result = (page.evaluate(script, arg=target_url) or "").strip()
+    except Exception:
+        result = ""
+    if not result:
         return
+    page.wait_for_timeout(COMMENT_LOAD_WAIT_MS)
+    emit_log(log_hook, "INFO", "All comments", result)
 
 
 def count_visible_comment_nodes(page, target_url: str = "") -> int:
@@ -1788,6 +1785,7 @@ def expand_visible_comment_threads(
     """
 
     previous_count = count_visible_comment_nodes(page, target_url=target_url)
+    no_growth_rounds = 0
     for round_index in range(1, rounds + 1):
         if round_index > 1:
             try:
@@ -1809,6 +1807,7 @@ def expand_visible_comment_threads(
                 "Comments expanded",
                 f"Round {round_index}: clicked {clicked_label} (visible nodes={current_count}).",
             )
+            no_growth_rounds = 0
         elif current_count > previous_count:
             emit_log(
                 log_hook,
@@ -1816,8 +1815,14 @@ def expand_visible_comment_threads(
                 "Comments expanded",
                 f"Round {round_index}: more visible comment nodes loaded (visible nodes={current_count}).",
             )
+            no_growth_rounds = 0
         else:
             emit_log(log_hook, "INFO", "Comments expanded", f"Round {round_index}: no additional visible comments or replies.")
+            no_growth_rounds += 1
+
+        if no_growth_rounds >= 2:
+            emit_log(log_hook, "INFO", "Comments expanded", "Stopping comment expansion after repeated no-growth rounds.")
+            break
 
         previous_count = current_count
 
@@ -2087,23 +2092,27 @@ def extract_metrics_from_loaded_post(
     collection_type: str,
     log_hook: Optional[LogHook] = None,
     scope_snapshot: Optional[dict[str, Any]] = None,
-) -> PostData:
+) -> dict[str, Any]:
     snapshot = scope_snapshot or inspect_active_post_scope(page, target_url=url)
     reactions, comments_count, shares = extract_text_metrics(page, target_url=url, scope_snapshot=snapshot)
     notes: list[str] = []
+    unavailable_metrics = 0
     if reactions is None:
         notes.append("Reactions unavailable in active post view")
         emit_log(log_hook, "WARN", "Metric unavailable", "Reactions not visible for this post.")
+        unavailable_metrics += 1
     else:
         emit_log(log_hook, "INFO", "Reactions extracted", str(reactions))
     if comments_count is None:
         notes.append("Comments count unavailable in active post view")
         emit_log(log_hook, "WARN", "Metric unavailable", "Comments count not visible for this post.")
+        unavailable_metrics += 1
     else:
         emit_log(log_hook, "INFO", "Comments count extracted", str(comments_count))
     if shares is None:
         notes.append("Shares unavailable in active post view")
         emit_log(log_hook, "WARN", "Metric unavailable", "Shares not visible for this post.")
+        unavailable_metrics += 1
     else:
         emit_log(log_hook, "INFO", "Shares extracted", str(shares))
 
@@ -2127,16 +2136,43 @@ def extract_metrics_from_loaded_post(
         ),
     )
 
-    return PostData(
-        url=url,
-        post_type=post_type,
-        post_date_raw=raw_date,
-        post_date_obj=date_obj,
-        reactions=reactions,
-        comments_count=comments_count,
-        shares=shares,
-        notes="; ".join(notes),
-        comments_preview=comments_preview,
+    return {
+        "post_link": url,
+        "post_date": raw_date or "N/A",
+        "post_date_obj": date_obj,
+        "post_type": post_type,
+        "reactions": reactions if reactions is not None else "N/A",
+        "comments_count": comments_count if comments_count is not None else "N/A",
+        "shares": shares if shares is not None else "N/A",
+        "notes": notes,
+        "unavailable_metrics": unavailable_metrics,
+        "comments_preview": comments_preview,
+    }
+
+
+def extract_post_from_feed(
+    page,
+    url: str,
+    collection_type: str,
+    log_hook: Optional[LogHook] = None,
+) -> Optional[dict[str, Any]]:
+    snapshot = inspect_active_post_scope(page, target_url=url)
+    if not snapshot.get("found"):
+        return None
+    if not (snapshot.get("matchedTarget") or snapshot.get("matchedSlug")):
+        return None
+
+    raw_date, date_obj = extract_post_date_from_snapshot(snapshot)
+    post_type = infer_post_type(url)
+    return extract_metrics_from_loaded_post(
+        page,
+        url,
+        raw_date,
+        date_obj,
+        post_type,
+        collection_type,
+        log_hook=log_hook,
+        scope_snapshot=snapshot,
     )
 
 
@@ -2164,7 +2200,15 @@ def format_post_date(post: PostData) -> str:
     return post.post_date_raw or "Cannot detect"
 
 
-def save_facebook_excel(posts: list[PostData], filename: str, coverage_label: str, collection_type: str) -> None:
+LAST_RUN_DIAGNOSTICS: dict[str, Any] = {}
+
+
+def set_run_diagnostics(payload: dict[str, Any]) -> None:
+    LAST_RUN_DIAGNOSTICS.clear()
+    LAST_RUN_DIAGNOSTICS.update(payload)
+
+
+def save_facebook_excel(posts: list[Any], filename: str, coverage_label: str, collection_type: str) -> None:
     wb = Workbook()
     ws = wb.active
     ws.title = "Facebook Posts"
@@ -2175,15 +2219,26 @@ def save_facebook_excel(posts: list[PostData], filename: str, coverage_label: st
     ws.append(["Post Link", "Post Date", "Post Type", "Reactions", "Comments Count", "Shares", "Notes"])
 
     for post in posts:
-        ws.append([
-            post.url,
-            format_post_date(post),
-            post.post_type,
-            "" if post.reactions is None else post.reactions,
-            "" if post.comments_count is None else post.comments_count,
-            "" if post.shares is None else post.shares,
-            post.notes,
-        ])
+        if isinstance(post, dict):
+            ws.append([
+                post.get("post_link", ""),
+                post.get("post_date", "N/A"),
+                post.get("post_type", ""),
+                post.get("reactions", "N/A"),
+                post.get("comments_count", "N/A"),
+                post.get("shares", "N/A"),
+                "; ".join(post.get("notes") or []),
+            ])
+        else:
+            ws.append([
+                post.url,
+                format_post_date(post),
+                post.post_type,
+                "" if post.reactions is None else post.reactions,
+                "" if post.comments_count is None else post.comments_count,
+                "" if post.shares is None else post.shares,
+                post.notes,
+            ])
 
     ws.column_dimensions["A"].width = 64
     ws.column_dimensions["B"].width = 16
@@ -2197,7 +2252,11 @@ def save_facebook_excel(posts: list[PostData], filename: str, coverage_label: st
     comments_sheet.append(["Post Link", "Thread Type", "Commenter", "Comment Date", "Comment Text"])
     comment_rows = 0
     for post in posts:
-        for comment in post.comments_preview:
+        if isinstance(post, dict):
+            comments = post.get("comments_preview") or []
+        else:
+            comments = post.comments_preview
+        for comment in comments:
             comment_rows += 1
             comments_sheet.append([
                 comment.post_url,
@@ -2215,6 +2274,13 @@ def save_facebook_excel(posts: list[PostData], filename: str, coverage_label: st
     comments_sheet.column_dimensions["C"].width = 24
     comments_sheet.column_dimensions["D"].width = 18
     comments_sheet.column_dimensions["E"].width = 80
+
+    diagnostics_sheet = wb.create_sheet("Diagnostics")
+    diagnostics_sheet.append(["Metric", "Value"])
+    for key, value in LAST_RUN_DIAGNOSTICS.items():
+        diagnostics_sheet.append([key, value])
+    diagnostics_sheet.column_dimensions["A"].width = 32
+    diagnostics_sheet.column_dimensions["B"].width = 64
 
     wb.save(filename)
 
