@@ -1261,6 +1261,9 @@ def validate_facebook_feed_ready(page, target_url: str = "", log_hook: Optional[
     except Exception as e:
         emit_log(log_hook, "ERROR", "Feed validation failed", str(e))
         return False, f"Feed validation error: {str(e)}"
+
+
+def collect_post_links(
     page,
     scroll_rounds: int,
     target_url: str = "",
