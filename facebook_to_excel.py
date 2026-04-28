@@ -99,6 +99,13 @@ LogHook = Callable[[str, str, str], None]
 ProgressHook = Callable[[int, int, int], None]
 
 
+class AuthRequiredError(RuntimeError):
+    def __init__(self, state: str, reason: str) -> None:
+        super().__init__(reason)
+        self.state = state
+        self.reason = reason
+
+
 @dataclass
 class CommentData:
     post_url: str
@@ -342,7 +349,8 @@ def normalize_facebook_post_url(raw_value: str, target_url: str = "") -> Optiona
         first_segment = path.strip("/").split("/")[0].strip().lower()
         slug_style = any(marker in lower_path for marker in ("/posts/", "/videos/", "/photos/", "/reels/", "/permalink/"))
         if slug_style and first_segment and first_segment not in {target_slug, "photo.php", "watch", "permalink.php"}:
-            return None
+            # Allow broader matches for public content; log-level filtering happens later.
+            pass
 
     keep_query_keys = {"story_fbid", "id", "fbid", "set", "type", "theater", "v"}
     query_pairs = []
@@ -947,13 +955,6 @@ def collect_visible_post_links(page, target_url: str = "") -> list[str]:
                         && /featured/i.test(node.closest("section, div")?.innerText || '')
                     );
                     if (inFeatured) continue;
-                    if (targetSlug) {
-                        const rootLinks = Array.from(node.querySelectorAll("a[href]"))
-                            .map((anchor) => normalizeHref(anchor.href))
-                            .filter(Boolean);
-                        const hasTargetSlug = rootLinks.some((href) => href.includes(`/${targetSlug}/`));
-                        if (!hasTargetSlug) continue;
-                    }
                     articleNodes.add(node);
                 }
             }
@@ -963,7 +964,9 @@ def collect_visible_post_links(page, target_url: str = "") -> list[str]:
                     for (const anchor of root.querySelectorAll(selector)) {
                         const href = normalizeHref(anchor.href || "");
                         if (!href) continue;
-                        if (targetSlug && !href.includes(`/${targetSlug}/`) && !href.includes('story_fbid=')) continue;
+                        if (targetSlug && !href.includes(`/${targetSlug}/`) && !href.includes('story_fbid=')) {
+                            // Allow broader matches; dedupe + normalization will filter out unrelated items.
+                        }
                         links.push(href);
                     }
                 }
@@ -1048,11 +1051,20 @@ def collect_post_links(
 ) -> list[str]:
     links: dict[str, bool] = {}
     stagnant_rounds = 0
-    stagnant_limit = max(6, min(14, max(6, scroll_rounds // 2))) if scroll_rounds > 0 else 6
+    stagnant_limit = max(8, min(18, max(8, scroll_rounds))) if scroll_rounds > 0 else 8
+    min_rounds_before_stop = max(6, min(scroll_rounds, max(6, scroll_rounds // 2))) if scroll_rounds > 0 else 6
     strategies = ("window-scroll", "mouse-wheel", "page-down", "bottom-jump")
     stop_reason = f"Reached max scroll rounds ({scroll_rounds})."
 
+    if not target_url:
+        try:
+            target_url = page.url or ""
+        except Exception:
+            target_url = ""
+
     focus_posts_section(page, log_hook=log_hook)
+
+    emit_log(log_hook, "INFO", "Checking login state", "Verifying Facebook access before scrolling.")
 
     initial_links = dedupe_post_links(collect_visible_post_links(page, target_url=target_url), target_url=target_url)
     for href in initial_links:
@@ -1066,6 +1078,16 @@ def collect_post_links(
         if cancel_check and cancel_check():
             raise RuntimeError("Cancelled during Facebook scrolling.")
 
+        checkpoint_required, checkpoint_reason = detect_checkpoint_or_verification(page)
+        if checkpoint_required:
+            emit_log(log_hook, "WARN", "Facebook checkpoint", checkpoint_reason)
+            raise AuthRequiredError("waiting_verification", checkpoint_reason)
+
+        login_required, login_reason = detect_login_gate(page)
+        if login_required:
+            emit_log(log_hook, "WARN", "Facebook login required", login_reason)
+            raise AuthRequiredError("waiting_login", login_reason)
+
         round_start = time.perf_counter()
         before_state = get_scroll_state(page)
         before_count = len(links)
@@ -1075,19 +1097,21 @@ def collect_post_links(
         anchors_after = before_state["linkCount"]
         article_count_after = before_state.get("articleCount", 0)
 
-        for strategy in strategies:
+        for attempt_index, strategy in enumerate(strategies, start=1):
             strategy_used = strategy
-            emit_log(log_hook, "INFO", f"Scroll {round_index}", f"Trying {strategy}.")
+            emit_log(log_hook, "INFO", f"Scroll {round_index}", f"Attempt {attempt_index}: {strategy}.")
             apply_scroll_strategy(page, strategy)
-            page.wait_for_timeout(120)
+            page.wait_for_timeout(200)
             after_state = wait_for_scroll_growth(page, before_state, SCROLL_WAIT_TIMEOUT)
             height_after = after_state["bodyHeight"]
             anchors_after = after_state["linkCount"]
             article_count_after = after_state.get("articleCount", before_state.get("articleCount", 0))
+
             fresh_links = dedupe_post_links(collect_visible_post_links(page, target_url=target_url), target_url=target_url)
             for href in fresh_links:
                 if href and href not in links:
                     links[href] = True
+
             if (
                 len(links) > before_count
                 or after_state.get("articleCount", 0) > before_state.get("articleCount", 0)
@@ -1095,9 +1119,8 @@ def collect_post_links(
                 or after_state["scrollTop"] > before_state["scrollTop"] + 24
             ):
                 break
-            page.wait_for_timeout(PROFILE_RETRY_MS)
-            if len(links) == before_count:
-                page.wait_for_timeout(2500)
+
+            page.wait_for_timeout(PROFILE_RETRY_MS + 400)
 
         new_links = len(links) - before_count
         article_growth = max(0, article_count_after - before_state.get("articleCount", 0))
@@ -1134,7 +1157,7 @@ def collect_post_links(
 
         emit_progress(progress_hook, round_index, scroll_rounds, len(links))
 
-        if stagnant_rounds >= stagnant_limit:
+        if stagnant_rounds >= stagnant_limit and round_index >= min_rounds_before_stop:
             stop_reason = f"Confirmed stagnation after {stagnant_rounds} rounds with no new Facebook links."
             break
 
@@ -1979,6 +2002,14 @@ def open_post_for_extraction(
     wait_for_selector(page, "body", 2000)
     apply_local_page_preferences(page)
     page.wait_for_timeout(450)
+    checkpoint_required, checkpoint_reason = detect_checkpoint_or_verification(page)
+    if checkpoint_required:
+        emit_log(log_hook, "WARN", "Facebook checkpoint", checkpoint_reason)
+        raise AuthRequiredError("waiting_verification", checkpoint_reason)
+    login_required, login_reason = detect_login_gate(page)
+    if login_required:
+        emit_log(log_hook, "WARN", "Facebook login required", login_reason)
+        raise AuthRequiredError("waiting_login", login_reason)
     focus_target_post(page, url, log_hook=log_hook)
     page.wait_for_timeout(600)
     post_type = infer_post_type(url)
@@ -2017,14 +2048,17 @@ def extract_metrics_from_loaded_post(
     notes: list[str] = []
     if reactions is None:
         notes.append("Reactions unavailable in active post view")
+        emit_log(log_hook, "WARN", "Metric unavailable", "Reactions not visible for this post.")
     else:
         emit_log(log_hook, "INFO", "Reactions extracted", str(reactions))
     if comments_count is None:
         notes.append("Comments count unavailable in active post view")
+        emit_log(log_hook, "WARN", "Metric unavailable", "Comments count not visible for this post.")
     else:
         emit_log(log_hook, "INFO", "Comments count extracted", str(comments_count))
     if shares is None:
         notes.append("Shares unavailable in active post view")
+        emit_log(log_hook, "WARN", "Metric unavailable", "Shares not visible for this post.")
     else:
         emit_log(log_hook, "INFO", "Shares extracted", str(shares))
 

@@ -21,6 +21,7 @@ const statusTitle = document.getElementById("statusTitle");
 const statusBadge = document.getElementById("statusBadge");
 const scrollRoundText = document.getElementById("scrollRoundText");
 const currentPostText = document.getElementById("currentPostText");
+const postProgressText = document.getElementById("postProgressText");
 const progressText = document.getElementById("progressText");
 const progressFill = document.getElementById("progressFill");
 const successText = document.getElementById("successText");
@@ -366,7 +367,9 @@ function renderStatus(data) {
     const scrapeHealth = Number(data.scrapeHealth || 100);
     const linksFound = Number(data.postsFound || 0);
     const errors = Number(data.errors || 0);
-    const itemUrl = data.currentPost || data.browserUrl || "";
+    const totalPosts = Number(data.totalPosts || data.total_posts || 0);
+    const currentIndex = Number(data.currentPostIndex || data.current_post_index || 0);
+    const itemUrl = data.currentPostUrl || data.currentPost || data.browserUrl || "";
 
     statusTitle.textContent = statusTitleFor(state);
     statusBadge.textContent = state || "idle";
@@ -374,6 +377,14 @@ function renderStatus(data) {
     scrollRoundText.textContent = `Round ${roundCurrent} / ${roundMax}`;
     currentPostText.textContent = formatDisplayUrl(itemUrl);
     currentPostText.title = itemUrl || "";
+
+    if (postProgressText) {
+        if (totalPosts > 0) {
+            postProgressText.textContent = `Post Progress: ${Math.min(currentIndex, totalPosts)} / ${totalPosts}`;
+        } else {
+            postProgressText.textContent = "Post Progress: -";
+        }
+    }
 
     progressText.textContent = `${progress}%`;
     progressFill.style.width = `${progress}%`;

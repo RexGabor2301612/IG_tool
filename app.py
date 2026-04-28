@@ -101,8 +101,11 @@ class JobController:
             self.current_scroll_round = 0
             self.total_scroll_rounds = 0
             self.posts_found = 0
+            self.total_posts = 0
+            self.current_post_index = 0
             self.posts_processed = 0
             self.posts_success = 0
+            self.skipped_posts = 0
             self.errors = 0
             self.progress = 0
             self.output_file = ""
@@ -155,18 +158,24 @@ class JobController:
             success_rate = round(100 * self.posts_success / self.posts_processed) if self.posts_processed else 0
             health = max(0, 100 - min(self.errors * 8, 70))
             payload = {
+                "platform": self.platform,
                 "status": self.status,
                 "state": self.status,
                 "activeTask": self.active_task,
                 "currentPost": self.current_post,
+                "currentPostUrl": self.current_post,
                 "scrollRound": self.current_scroll_round,
                 "maxScrollRounds": self.total_scroll_rounds,
                 "postsFound": self.posts_found,
+                "totalPosts": self.total_posts,
+                "currentPostIndex": self.current_post_index,
                 "postsProcessed": self.posts_processed,
                 "postsSuccess": self.posts_success,
+                "skippedPosts": self.skipped_posts,
                 "errors": self.errors,
                 "progress": self.progress,
                 "successRate": success_rate,
+                "success_rate": success_rate,
                 "scrapeHealth": health,
                 "outputFile": self.output_file,
                 "config": self.config_summary,
@@ -178,6 +187,15 @@ class JobController:
                 "verificationRequired": self.verification_required,
                 "readyToScrape": self.ready_to_scrape,
                 "browserUrl": self.browser_url,
+                "current_scroll_round": self.current_scroll_round,
+                "total_scroll_rounds": self.total_scroll_rounds,
+                "posts_found": self.posts_found,
+                "total_posts": self.total_posts,
+                "current_post_index": self.current_post_index,
+                "posts_processed": self.posts_processed,
+                "posts_success": self.posts_success,
+                "skipped_posts": self.skipped_posts,
+                "errors_count": self.errors,
                 "canGo": (
                     self.status == "ready"
                     and self.browser_session_created
@@ -332,7 +350,7 @@ class JobController:
                 self.browser_url = page.url or config.target_url
                 self.started_at = time.time()
                 self.output_file = config.output_file
-            self._log(LogLevel.INFO, "Browser opened", "Playwright browser session created.")
+            self._log(LogLevel.INFO, f"{self.adapter.name} browser opened", "Playwright browser session created.")
 
             page.goto(config.target_url, wait_until="domcontentloaded", timeout=60_000)
 
@@ -357,17 +375,26 @@ class JobController:
             self._broadcast_snapshot()
 
             diagnostics: dict[str, Any] = {}
-            links = self.adapter.collect_post_links(
-                page,
-                scroll_rounds=config.scroll_rounds,
-                start_date=config.start_date,
-                log_hook=self._log_hook,
-                progress_hook=self._progress_hook,
-                cancel_check=lambda: self.cancel_requested,
-                diagnostics=diagnostics,
-            )
+            while True:
+                try:
+                    links = self.adapter.collect_post_links(
+                        page,
+                        scroll_rounds=config.scroll_rounds,
+                        start_date=config.start_date,
+                        log_hook=self._log_hook,
+                        progress_hook=self._progress_hook,
+                        cancel_check=lambda: self.cancel_requested,
+                        diagnostics=diagnostics,
+                    )
+                    break
+                except Exception as exc:
+                    if exc.__class__.__name__ != "AuthRequiredError":
+                        raise
+                    self._log(LogLevel.WARN, "Auth required during scroll", str(exc))
+                    self._wait_for_ready(page, context, config)
             with self.lock:
                 self.posts_found = len(links)
+                self.total_posts = len(links)
                 self.progress = 30
             self._log(LogLevel.SUCCESS, "Collected links", f"Found {len(links)} unique links.")
             self._broadcast_snapshot()
@@ -380,12 +407,20 @@ class JobController:
 
                 with self.lock:
                     self.current_post = link
-                    self.posts_processed = index - 1
+                    self.current_post_index = index
                     self.progress = 30 + round(60 * (index - 1) / max(total, 1))
                 self._broadcast_snapshot()
 
+                self._log(LogLevel.INFO, "Processing post", f"{index}/{total}: {link}")
+
                 try:
                     post = self.adapter.extract_post(page, link, config.collection_type, log_hook=self._log_hook)
+                    post_date = getattr(post, "post_date_obj", None)
+                    if post_date and (post_date < config.start_date or (config.end_date and post_date > config.end_date)):
+                        with self.lock:
+                            self.skipped_posts += 1
+                        self._log(LogLevel.WARN, "Post skipped", "Outside selected date coverage.")
+                        continue
                     posts.append(post)
                     record = self.adapter.post_to_record(post)
                     if not self.buffer.add(record):
@@ -394,12 +429,16 @@ class JobController:
                     with self.lock:
                         self.posts_success += 1
                 except Exception as exc:
+                    if exc.__class__.__name__ == "AuthRequiredError":
+                        self._log(LogLevel.WARN, "Auth required during extraction", str(exc))
+                        self._wait_for_ready(page, context, config)
+                        continue
                     with self.lock:
                         self.errors += 1
                     self._log(LogLevel.WARN, "Extraction failed", f"{link} ({type(exc).__name__}: {exc})")
 
                 with self.lock:
-                    self.posts_processed = index
+                    self.posts_processed += 1
 
             self._flush_buffer()
             coverage_label = self.adapter.format_date_coverage(config.start_date, config.end_date)
