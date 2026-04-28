@@ -206,7 +206,6 @@
             </div>
             <div class="secondary-actions">
                 <button class="secondary-btn disabled" id="focusBrowserBtn" type="button" disabled>Focus Browser</button>
-                <button class="secondary-btn disabled" id="forceReadyBtn" type="button" disabled>Force Ready</button>
                 <button class="secondary-btn" id="centerShowLogsBtn" type="button">Show Logs</button>
             </div>
 
@@ -379,36 +378,8 @@
         </div>
     </div>
 
-    <!-- ====================================================
-         Comment Collection Modal (appears after metrics save)
-         ==================================================== -->
-    <div class="modal-backdrop hidden" id="commentsModal">
-        <div class="modal-card comments-modal-card">
-            <div class="comments-modal-icon" aria-hidden="true">💬</div>
-            <p class="modal-eyebrow">Extraction Complete</p>
-            <h3 class="modal-title">Collect all comments?</h3>
-            <p class="comments-modal-body">
-                Metrics from <strong><span id="commentsPostCount">0</span> posts</strong> have been saved.
-                Do you also want to collect all visible comments? This will navigate to each post,
-                expand all comments, and write them to a separate sheet in your Excel file —
-                with automatic sentiment classification.
-            </p>
-            <div class="comments-modal-time-note">
-                ⏱ This may take several minutes depending on post count and comment volume.
-            </div>
-            <div class="modal-actions">
-                <button class="primary-btn go-btn" id="collectCommentsBtn" type="button">
-                    Yes, collect &amp; classify comments
-                </button>
-                <button class="secondary-btn" id="skipCommentsBtn" type="button">
-                    No, download now
-                </button>
-            </div>
-        </div>
-    </div>
-
     <script>
-        window.PLATFORM_CONFIG = {{ platform_config|tojson }};
+        window.PLATFORM_CONFIG = {{ platform_config_json | safe }};
     </script>
     <script src="{{ url_for('static', filename='js/dashboard.js') }}" defer></script>
 </body>

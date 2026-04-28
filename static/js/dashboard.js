@@ -33,7 +33,6 @@ const cancelBtn = document.getElementById("cancelBtn");
 const runStartBtn = document.getElementById("runStartBtn");
 const goBtn = document.getElementById("goBtn");
 const focusBrowserBtn = document.getElementById("focusBrowserBtn");
-const forceReadyBtn = document.getElementById("forceReadyBtn");
 const centerShowLogsBtn = document.getElementById("centerShowLogsBtn");
 const browserModeDescription = document.getElementById("browserModeDescription");
 const browserModeText = document.getElementById("browserModeText");
@@ -346,7 +345,6 @@ function setButtonStates(data) {
 
     setButtonDisabled(runStartBtn, placeholder || running || state === "preparing");
     setButtonDisabled(goBtn, placeholder || !canGoNow);
-    setButtonDisabled(forceReadyBtn, placeholder || !started || canGoNow || running);
     setButtonDisabled(focusBrowserBtn, placeholder || !canFocus);
     setButtonDisabled(cancelBtn, placeholder || !started);
     setButtonDisabled(downloadBtn, placeholder || !canDownload);
@@ -449,16 +447,6 @@ function connectSocket(force = false) {
                 renderStatus(payload.data || {});
             } else if ((payload.type === "log" || payload.type === "log_event") && payload.data) {
                 appendLiveLog(payload.data);
-            } else if (payload.type === "comments_prompt") {
-                showCommentsModal(payload.data?.postCount || 0);
-            } else if (payload.type === "comments_completed") {
-                hideCommentsModal();
-                formMessage.textContent = `Comments collected and saved. Download your file.`;
-                formMessage.className = "form-message success";
-                refreshStatus();
-            } else if (payload.type === "comments_skipped") {
-                hideCommentsModal();
-                refreshStatus();
             } else if (payload.type === "job_completed") {
                 refreshStatus();
             }
@@ -573,15 +561,6 @@ async function focusBrowser() {
     formMessage.className = "form-message info";
 }
 
-async function forceReady() {
-    if (isPlaceholderPlatform()) {
-        return;
-    }
-    const data = await fetchJson(apiUrl("/force-ready"), { method: "POST" });
-    formMessage.textContent = data.message || "Force Ready enabled. Click GO when your target page is visible.";
-    formMessage.className = "form-message info";
-    await refreshStatus();
-}
 
 async function cancelScrape() {
     if (isPlaceholderPlatform()) {
@@ -675,14 +654,6 @@ focusBrowserBtn?.addEventListener("click", async () => {
     }
 });
 
-forceReadyBtn?.addEventListener("click", async () => {
-    try {
-        await forceReady();
-    } catch (error) {
-        formMessage.textContent = error.message;
-        formMessage.className = "form-message error";
-    }
-});
 
 cancelBtn?.addEventListener("click", async () => {
     try {
@@ -769,48 +740,4 @@ refreshStatus().catch((error) => {
     formMessage.className = "form-message error";
 });
 
-// ---------------------------------------------------------------------------
-// Comment collection modal
-// ---------------------------------------------------------------------------
-const commentsModal = document.getElementById("commentsModal");
-const commentsPostCount = document.getElementById("commentsPostCount");
-const collectCommentsBtn = document.getElementById("collectCommentsBtn");
-const skipCommentsBtn = document.getElementById("skipCommentsBtn");
-
-function showCommentsModal(postCount) {
-    if (!commentsModal) return;
-    if (commentsPostCount) commentsPostCount.textContent = String(postCount || 0);
-    commentsModal.classList.remove("hidden");
-}
-
-function hideCommentsModal() {
-    if (commentsModal) commentsModal.classList.add("hidden");
-}
-
-collectCommentsBtn?.addEventListener("click", async () => {
-    hideCommentsModal();
-    try {
-        await fetchJson(apiUrl("/collect-comments"), { method: "POST" });
-        formMessage.textContent = "Comment collection started. This may take a while…";
-        formMessage.className = "form-message info";
-        await refreshStatus();
-    } catch (error) {
-        formMessage.textContent = error.message;
-        formMessage.className = "form-message error";
-    }
-});
-
-skipCommentsBtn?.addEventListener("click", async () => {
-    hideCommentsModal();
-    try {
-        await fetchJson(apiUrl("/skip-comments"), { method: "POST" });
-        formMessage.textContent = "Comment collection skipped. File is ready to download.";
-        formMessage.className = "form-message success";
-        await refreshStatus();
-        triggerDownload();
-    } catch (error) {
-        formMessage.textContent = error.message;
-        formMessage.className = "form-message error";
-    }
-});
 
