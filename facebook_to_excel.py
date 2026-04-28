@@ -151,6 +151,9 @@ def apply_context_preferences(context) -> None:
         context.add_init_script(
             """() => {
                 try {
+                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+                    Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
                     if (window.Notification) {
                         try {
                             Object.defineProperty(Notification, 'permission', {
@@ -237,8 +240,9 @@ def has_login_credentials() -> bool:
 
 def load_or_create_context(browser):
     context_options = {
-        "viewport": {"width": 1440, "height": 960},
+        "viewport": {"width": 1366, "height": 900},
         "locale": "en-US",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     }
     storage_path = get_storage_state_path(require_exists=True)
     if storage_path is not None:
@@ -767,10 +771,11 @@ def launch_browser(playwright):
             "--no-sandbox",
             "--disable-setuid-sandbox",
             "--disable-dev-shm-usage",
-            "--disable-gpu",
             "--disable-notifications",
             "--deny-permission-prompts",
             "--disable-features=NotificationTriggers,PermissionsPromptService,PushMessaging",
+            "--disable-blink-features=AutomationControlled",
+            "--start-maximized",
             "--no-first-run",
             "--no-default-browser-check",
         ],
@@ -782,8 +787,9 @@ def launch_browser(playwright):
         user_data_dir.mkdir(parents=True, exist_ok=True)
         persistent_options = {
             "headless": False,
-            "viewport": {"width": 1440, "height": 960},
+            "viewport": None,
             "locale": "en-US",
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "args": launch_options["args"],
         }
         if PLAYWRIGHT_BROWSER_CHANNEL:
@@ -890,6 +896,11 @@ def focus_posts_section(page, log_hook: Optional[LogHook] = None) -> None:
         if moved:
             page.wait_for_timeout(250)
             emit_log(log_hook, "INFO", "Posts section", "Scrolled the Facebook page to the posts section before collecting links.")
+        try:
+            page.wait_for_load_state("networkidle", timeout=8000)
+        except Exception:
+            pass
+        page.wait_for_timeout(1200)
     except Exception:
         return
 
@@ -981,6 +992,10 @@ def get_scroll_state(page) -> dict[str, Any]:
     return page.evaluate(
         """() => {
             const doc = document.scrollingElement || document.documentElement;
+            const feed = document.querySelector("div[role='feed']");
+            const visiblePosts = document.querySelectorAll(
+                "div[role='main'] div[role='article'], div[role='feed'] div[role='article'], div[data-pagelet*='FeedUnit'], div[aria-posinset]"
+            ).length;
             const anchors = new Set(
                 Array.from(document.querySelectorAll("a[href*='/posts/'], a[href*='/videos/'], a[href*='/permalink/'], a[href*='story_fbid='], a[href*='/photo.php'], a[href*='/watch/?v=']")).map(a => (a.href || '').split('&__')[0]).filter(Boolean)
             );
@@ -993,6 +1008,8 @@ def get_scroll_state(page) -> dict[str, Any]:
             const top = Number(doc.scrollTop || window.pageYOffset || 0);
             const viewport = Number(window.innerHeight || doc.clientHeight || 0);
             return {
+                feedDetected: Boolean(feed),
+                visiblePosts,
                 linkCount: anchors.size,
                 articleCount,
                 scrollTop: top,
@@ -1065,6 +1082,16 @@ def collect_post_links(
     focus_posts_section(page, log_hook=log_hook)
 
     emit_log(log_hook, "INFO", "Checking login state", "Verifying Facebook access before scrolling.")
+    initial_state = get_scroll_state(page)
+    emit_log(
+        log_hook,
+        "INFO",
+        "Visibility debug",
+        (
+            f"Feed detected: {'YES' if initial_state.get('feedDetected') else 'NO'}, "
+            f"visible posts: {initial_state.get('visiblePosts', 0)}, anchors: {initial_state.get('linkCount', 0)}."
+        ),
+    )
 
     initial_links = dedupe_post_links(collect_visible_post_links(page, target_url=target_url), target_url=target_url)
     for href in initial_links:
@@ -1090,6 +1117,15 @@ def collect_post_links(
 
         round_start = time.perf_counter()
         before_state = get_scroll_state(page)
+        emit_log(
+            log_hook,
+            "INFO",
+            "Visibility debug",
+            (
+                f"Round {round_index}: feed={'YES' if before_state.get('feedDetected') else 'NO'}, "
+                f"visible posts={before_state.get('visiblePosts', 0)}, anchors={before_state.get('linkCount', 0)}."
+            ),
+        )
         before_count = len(links)
         strategy_used = "none"
         height_before = before_state["bodyHeight"]
@@ -1101,6 +1137,10 @@ def collect_post_links(
             strategy_used = strategy
             emit_log(log_hook, "INFO", f"Scroll {round_index}", f"Attempt {attempt_index}: {strategy}.")
             apply_scroll_strategy(page, strategy)
+            try:
+                page.mouse.move(120 + attempt_index * 10, 360 + attempt_index * 6, steps=5)
+            except Exception:
+                pass
             page.wait_for_timeout(200)
             after_state = wait_for_scroll_growth(page, before_state, SCROLL_WAIT_TIMEOUT)
             height_after = after_state["bodyHeight"]
@@ -1999,6 +2039,11 @@ def open_post_for_extraction(
     log_hook: Optional[LogHook] = None,
 ) -> tuple[str, Optional[datetime], str, dict[str, Any]]:
     page.goto(url, wait_until="domcontentloaded", timeout=goto_timeout)
+    try:
+        page.wait_for_load_state("networkidle", timeout=12_000)
+    except Exception:
+        pass
+    page.wait_for_timeout(1200)
     wait_for_selector(page, "body", 2000)
     apply_local_page_preferences(page)
     page.wait_for_timeout(450)

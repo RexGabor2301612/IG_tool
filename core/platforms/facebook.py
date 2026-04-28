@@ -97,8 +97,17 @@ class FacebookAdapter(PlatformAdapter):
         )
 
     def extract_post(self, page, url: str, collection_type: Optional[str], log_hook: Optional[Callable[[str, str, str], None]] = None) -> Any:
-        raw_date, date_obj, post_type = fb.open_post_for_extraction(page, url)
-        return fb.extract_metrics_from_loaded_post(page, url, raw_date, date_obj, post_type, collection_type or "posts_only", log_hook=log_hook)
+        raw_date, date_obj, post_type, scope_snapshot = fb.open_post_for_extraction(page, url, log_hook=log_hook)
+        return fb.extract_metrics_from_loaded_post(
+            page,
+            url,
+            raw_date,
+            date_obj,
+            post_type,
+            collection_type or "posts_only",
+            log_hook=log_hook,
+            scope_snapshot=scope_snapshot,
+        )
 
     def post_to_record(self, post: Any) -> dict[str, Any]:
         return {

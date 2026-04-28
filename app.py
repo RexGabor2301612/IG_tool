@@ -351,6 +351,15 @@ class JobController:
                 self.started_at = time.time()
                 self.output_file = config.output_file
             self._log(LogLevel.INFO, f"{self.adapter.name} browser opened", "Playwright browser session created.")
+            try:
+                viewport = page.viewport_size or {}
+                self._log(
+                    LogLevel.INFO,
+                    "Viewport",
+                    f"{viewport.get('width', 'auto')}x{viewport.get('height', 'auto')} ({self.adapter.name})",
+                )
+            except Exception:
+                pass
 
             page.goto(config.target_url, wait_until="domcontentloaded", timeout=60_000)
 
@@ -453,7 +462,8 @@ class JobController:
             self._broadcast_snapshot()
 
             context.close()
-            browser.close()
+            if browser is not None:
+                browser.close()
 
     def start(self, config: WebScrapeConfig) -> None:
         if self.thread and self.thread.is_alive():

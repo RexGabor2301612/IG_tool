@@ -53,6 +53,11 @@ const statProgress = document.getElementById("statProgress");
 const statSuccessRate = document.getElementById("statSuccessRate");
 const statErrors = document.getElementById("statErrors");
 
+const visibilityFeed = document.getElementById("visibilityFeed");
+const visibilityPosts = document.getElementById("visibilityPosts");
+const visibilityAnchors = document.getElementById("visibilityAnchors");
+const visibilityNote = document.getElementById("visibilityNote");
+
 const confirmationModal = document.getElementById("confirmationModal");
 const summaryLink = document.getElementById("summaryLink");
 const summaryScroll = document.getElementById("summaryScroll");
@@ -303,6 +308,32 @@ function renderLogs(logs) {
     liveLogs = Array.isArray(logs) ? logs.slice() : [];
     renderLogRows(logsBody, liveLogs);
     renderLogRows(modalLogsBody, liveLogs);
+    updateVisibilityPanel(liveLogs);
+}
+
+function updateVisibilityPanel(logs) {
+    if (!visibilityFeed || !visibilityPosts || !visibilityAnchors || !visibilityNote) {
+        return;
+    }
+
+    const latest = logs.find((log) => String(log.action || "") === "Visibility debug");
+    if (!latest) {
+        visibilityFeed.textContent = "-";
+        visibilityPosts.textContent = "-";
+        visibilityAnchors.textContent = "-";
+        visibilityNote.textContent = "Waiting for scroll logs.";
+        return;
+    }
+
+    const detail = String(latest.details || "");
+    const feedMatch = detail.match(/Feed detected:\s*(YES|NO)/i);
+    const postMatch = detail.match(/visible posts:\s*(\d+)/i);
+    const anchorMatch = detail.match(/anchors:\s*(\d+)/i);
+
+    visibilityFeed.textContent = feedMatch ? feedMatch[1].toUpperCase() : "-";
+    visibilityPosts.textContent = postMatch ? postMatch[1] : "-";
+    visibilityAnchors.textContent = anchorMatch ? anchorMatch[1] : "-";
+    visibilityNote.textContent = detail || "Visibility log received.";
 }
 
 function showSelectedLog(index) {

@@ -118,7 +118,7 @@ button,input,select{font:inherit;cursor:pointer}
 .status-progress-row{margin-top:12px;padding:12px 14px;border-radius:14px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.07)}
 .status-card{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.07);border-radius:14px;padding:14px}
 .status-card-label{font-size:.75rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.14em;margin-bottom:6px}
-.status-card-value{font-size:.95rem;font-weight:700;word-break:break-all;line-height:1.35;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical}
+.status-card-value{font-size:.95rem;font-weight:700;word-break:break-word;line-height:1.35;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical}
 .meter-group{margin-top:14px}
 .meter-head{display:flex;justify-content:space-between;font-size:.85rem;color:#94a3b8;margin-bottom:6px}
 .meter-track{height:10px;border-radius:999px;background:rgba(255,255,255,.07);overflow:hidden}
@@ -131,13 +131,13 @@ button,input,select{font:inherit;cursor:pointer}
 .output-row{display:flex;gap:14px;align-items:center;justify-content:space-between}
 .output-card{flex:1;min-width:0;padding:16px 18px;border-radius:16px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.1);backdrop-filter:blur(8px)}
 .output-card .panel-eyebrow{color:#93c5fd}
-.output-file-name{font-weight:700;font-size:.95rem;color:#fff;word-break:break-all;margin-top:4px}
+.output-file-name{font-weight:700;font-size:.95rem;color:#fff;word-break:break-word;margin-top:4px}
 
 /* BROWSER SESSION */
 .browser-description{font-size:.9rem;color:#94a3b8;line-height:1.6;margin-top:12px}
 .browser-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-top:14px}
 .browser-card{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.07);border-radius:14px;padding:14px}
-.browser-card-value{font-size:.9rem;font-weight:700;color:#e2e8f0;word-break:break-all;margin-top:4px;line-height:1.4}
+.browser-card-value{font-size:.9rem;font-weight:700;color:#e2e8f0;word-break:break-word;margin-top:4px;line-height:1.4}
 .browser-status-pill{padding:7px 13px;border-radius:999px;background:rgba(22,163,74,.14);color:#bbf7d0;font-size:.78rem;font-weight:800;border:1px solid rgba(22,163,74,.2)}
 
 /* LOGS PANEL */
@@ -177,6 +177,13 @@ button,input,select{font:inherit;cursor:pointer}
 .mini-feature-tag{display:inline-block;padding:3px 9px;border-radius:999px;background:#eff6ff;color:#2563eb;font-size:.72rem;font-weight:800;text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px}
 .mini-feature-card h4{font-size:.95rem;font-weight:800;margin-bottom:4px}
 .mini-feature-card p{font-size:.83rem;color:var(--muted);line-height:1.55}
+
+/* VISIBILITY PANEL */
+.visibility-panel{background:var(--dark);color:#fff;border:1px solid rgba(255,255,255,.06);border-radius:var(--radius-xl);box-shadow:0 22px 44px rgba(2,6,23,.2);padding:18px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.visibility-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.visibility-label{font-size:.7rem;text-transform:uppercase;letter-spacing:.14em;color:#93c5fd;font-weight:700}
+.visibility-value{font-size:1.05rem;font-weight:800;color:#e2e8f0;margin-top:6px;word-break:break-word}
+.visibility-note{font-size:.82rem;color:#94a3b8;line-height:1.5}
 
 /* MODALS */
 .modal-backdrop{position:fixed;inset:0;background:rgba(2,6,23,.72);backdrop-filter:blur(6px);z-index:100;display:flex;align-items:center;justify-content:center;padding:20px;animation:fade-in .2s ease}
