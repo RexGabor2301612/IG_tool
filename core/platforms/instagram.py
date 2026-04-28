@@ -39,7 +39,7 @@ class InstagramAdapter(PlatformAdapter):
             collection_type_enabled=False,
             collection_type_label="",
             collection_type_options=[],
-            api_base="",
+            api_base="/api",
             ws_path="/ws/dashboard",
             link_payload_key="instagramLink",
         )

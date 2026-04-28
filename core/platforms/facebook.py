@@ -42,7 +42,7 @@ class FacebookAdapter(PlatformAdapter):
                 {"value": "posts_only", "label": "Posts only"},
                 {"value": "posts_with_comments", "label": "Posts with visible comments"},
             ],
-            api_base="/facebook",
+            api_base="/facebook/api",
             ws_path="/facebook/ws/dashboard",
             link_payload_key="facebookLink",
         )
