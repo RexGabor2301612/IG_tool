@@ -39,11 +39,10 @@ class FacebookAdapter(PlatformAdapter):
             latest_mode_label="Collect from start date up to latest visible content",
             default_output_file="facebook_extract.xlsx",
             default_latest_mode=True,
-            collection_type_enabled=True,
+            collection_type_enabled=False,
             collection_type_label="Collection type",
             collection_type_options=[
                 {"value": "posts_only", "label": "Posts only"},
-                {"value": "posts_with_comments", "label": "Posts with visible comments"},
             ],
             api_base="/facebook/api",
             ws_path="/facebook/ws/dashboard",
@@ -102,7 +101,7 @@ class FacebookAdapter(PlatformAdapter):
         )
 
     def extract_post(self, page, url: str, collection_type: Optional[str], log_hook: Optional[Callable[[str, str, str], None]] = None) -> Any:
-        feed_first = fb.extract_post_from_feed(page, url, collection_type or "posts_only", log_hook=log_hook)
+        feed_first = fb.extract_post_from_feed(page, url, "posts_only", log_hook=log_hook)
         if feed_first is not None:
             return feed_first
 
@@ -113,7 +112,7 @@ class FacebookAdapter(PlatformAdapter):
             raw_date,
             date_obj,
             post_type,
-            collection_type or "posts_only",
+            "posts_only",
             log_hook=log_hook,
             scope_snapshot=scope_snapshot,
         )
@@ -147,7 +146,7 @@ class FacebookAdapter(PlatformAdapter):
         }
 
     def export_excel(self, posts: list[Any], output_file: str, coverage_label: str, collection_type: Optional[str]) -> None:
-        fb.save_facebook_excel(posts, output_file, coverage_label, collection_type or "posts_only")
+        fb.save_facebook_excel(posts, output_file, coverage_label, "posts_only")
 
     def set_run_diagnostics(self, payload: dict[str, Any]) -> None:
         fb.set_run_diagnostics(payload)

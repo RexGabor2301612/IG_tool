@@ -273,6 +273,7 @@ class JobController:
             self.etl.save_post(record)
 
     def _wait_for_ready(self, page, context, config: WebScrapeConfig) -> None:
+        self._transition(ScrapeState.PAGE_READINESS_CHECK, "Starting page readiness checks")
         self._log(LogLevel.INFO, "Checking for saved session", f"Looking for cached {self.adapter.name} credentials.")
         deadline = time.monotonic() + (LOGIN_READY_TIMEOUT / 1000)
         verification_logged = False
@@ -384,6 +385,12 @@ class JobController:
 
             page.goto(config.target_url, wait_until="domcontentloaded", timeout=60_000)
             self._log(LogLevel.INFO, "Page loaded", f"Navigated to {config.target_url}")
+            
+            # Intermediate loading state - DOM is loaded but readiness checks pending
+            with self.lock:
+                self.status = "loading"
+                self.active_task = "Checking page readiness"
+            self._transition(ScrapeState.SESSION_LOADING, "Page DOM loaded, checking readiness")
 
             if self.adapter.auto_login_if_needed(page, context, config.target_url, log_hook=self._log_hook):
                 self._log(LogLevel.SUCCESS, "Session restored", "Auto-login restored the session.")

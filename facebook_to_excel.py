@@ -239,8 +239,9 @@ def has_login_credentials() -> bool:
 
 
 def load_or_create_context(browser):
+    # Use consistent viewport for stable positioning and scrolling
     context_options = {
-        "viewport": {"width": 1920, "height": 1080},
+        "viewport": {"width": 1365, "height": 900},
         "locale": "en-US",
         "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     }
@@ -855,23 +856,50 @@ def apply_local_page_preferences(page) -> None:
     if not uses_local_browser_window():
         return
     try:
+        # Reset zoom to 100%
         page.keyboard.press("Control+0")
-        page.wait_for_timeout(60)
-        page.keyboard.press("Control+-")
-        page.wait_for_timeout(60)
-        page.keyboard.press("Control+-")
+        page.wait_for_timeout(100)
+    except Exception:
+        try:
+            page.evaluate("document.body.style.zoom = '100%';")
+        except Exception:
+            pass
+
+
+def normalize_facebook_page_viewport(page, log_hook: Optional[LogHook] = None) -> None:
+    """Normalize viewport, zoom, and scroll position for stable Facebook content positioning."""
+    try:
+        # Reset zoom to 100%
+        page.keyboard.press("Control+0")
+        page.wait_for_timeout(150)
     except Exception:
         try:
             page.evaluate(
                 """() => {
-                    const targets = [document.documentElement, document.body].filter(Boolean);
-                    for (const node of targets) {
-                        node.style.zoom = '75%';
+                    for (const elem of [document.documentElement, document.body]) {
+                        if (elem) {
+                            elem.style.zoom = '100%';
+                        }
                     }
                 }"""
             )
         except Exception:
-            return
+            pass
+
+    # Scroll to top before starting collection
+    try:
+        page.evaluate("window.scrollTo(0, 0);")
+        page.wait_for_timeout(300)
+    except Exception:
+        pass
+
+    # Log viewport normalization
+    if log_hook:
+        try:
+            viewport = page.evaluate("() => ({ width: window.innerWidth, height: window.innerHeight, scrollY: window.scrollY })")
+            emit_log(log_hook, "INFO", "Viewport normalized", f"Position: {viewport}")
+        except Exception:
+            emit_log(log_hook, "INFO", "Viewport normalized", "Page positioning reset to top with 100% zoom")
 
 
 def focus_posts_section(page, log_hook: Optional[LogHook] = None) -> None:
@@ -1027,17 +1055,99 @@ def get_scroll_state(page) -> dict[str, Any]:
 
 
 def apply_scroll_strategy(page, strategy: str) -> None:
+    """Apply scroll strategy with deterministic scroll distances.
+    
+    Args:
+        strategy: Scroll method to use (window-scroll, mouse-wheel, page-down, bottom-jump)
+    """
     if strategy == "window-scroll":
-        page.evaluate("window.scrollBy(0, Math.max(window.innerHeight * 0.9, 900));")
+        # Use 75% of viewport height for consistent scrolling (typically ~675px at 900px height)
+        page.evaluate("window.scrollBy(0, Math.max(window.innerHeight * 0.75, 550));")
     elif strategy == "mouse-wheel":
+        # Mouse wheel: 2200px per wheel units
         page.mouse.wheel(0, 2200)
     elif strategy == "page-down":
         page.keyboard.press("PageDown")
     else:
+        # bottom-jump: scroll to absolute bottom
         page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
 
 
+def wait_for_scroll_stabilization(page, timeout_ms: int = SCROLL_WAIT_TIMEOUT) -> dict[str, Any]:
+    """
+    REAL scroll stabilization: Wait until scrolling stops and DOM settles.
+    
+    Waits for:
+    - scrollY to stop changing (2 consecutive checks with same value)
+    - document.body.scrollHeight to stabilize
+    - post elements count to stabilize for 2 cycles
+    """
+    try:
+        page.wait_for_function(
+            """(timeout_ms) => {
+                const start = Date.now();
+                let lastScrollY = window.scrollY;
+                let lastScrollHeight = document.body.scrollHeight;
+                let lastPostCount = document.querySelectorAll("a[href*='/posts/'], a[href*='/videos/'], a[href*='/permalink/'], a[href*='story_fbid='], a[href*='/photo.php']").length;
+                let scrollStableCount = 0;
+                let heightStableCount = 0;
+                let postCountStableCount = 0;
+                
+                return new Promise(resolve => {
+                    const checkStability = () => {
+                        const now = Date.now();
+                        if (now - start > timeout_ms) {
+                            resolve(true);
+                            return;
+                        }
+                        
+                        const currentScrollY = window.scrollY;
+                        const currentScrollHeight = document.body.scrollHeight;
+                        const currentPostCount = document.querySelectorAll("a[href*='/posts/'], a[href*='/videos/'], a[href*='/permalink/'], a[href*='story_fbid='], a[href*='/photo.php']").length;
+                        
+                        // Check stability
+                        if (Math.abs(currentScrollY - lastScrollY) < 5) {
+                            scrollStableCount++;
+                        } else {
+                            scrollStableCount = 0;
+                        }
+                        
+                        if (Math.abs(currentScrollHeight - lastScrollHeight) < 5) {
+                            heightStableCount++;
+                        } else {
+                            heightStableCount = 0;
+                        }
+                        
+                        if (Math.abs(currentPostCount - lastPostCount) === 0) {
+                            postCountStableCount++;
+                        } else {
+                            postCountStableCount = 0;
+                        }
+                        
+                        lastScrollY = currentScrollY;
+                        lastScrollHeight = currentScrollHeight;
+                        lastPostCount = currentPostCount;
+                        
+                        // All stable for 2 cycles = DOM is ready
+                        if (scrollStableCount >= 2 && heightStableCount >= 2 && postCountStableCount >= 2) {
+                            resolve(true);
+                        } else {
+                            setTimeout(checkStability, 150);
+                        }
+                    };
+                    checkStability();
+                });
+            }""",
+            arg=timeout_ms,
+            timeout=timeout_ms + 1000,
+        )
+    except Exception:
+        pass
+    return get_scroll_state(page)
+
+
 def wait_for_scroll_growth(page, previous_state: dict[str, Any], timeout_ms: int = SCROLL_WAIT_TIMEOUT) -> dict[str, Any]:
+    """Original scroll growth check, now called after stabilization."""
     try:
         page.wait_for_function(
             """(prev) => {
@@ -1062,7 +1172,95 @@ def wait_for_scroll_growth(page, previous_state: dict[str, Any], timeout_ms: int
     return get_scroll_state(page)
 
 
-def collect_post_links(
+def validate_facebook_feed_ready(page, target_url: str = "", log_hook: Optional[LogHook] = None) -> tuple[bool, str]:
+    """
+    STRICT feed validation - DO NOT start collection unless feed is confirmed ready.
+    
+    Checks:
+    - Feed container is visible
+    - No loading skeletons
+    - No spinners
+    - At least 1 post card present
+    - DOM is stable
+    """
+    try:
+        # Check feed container exists and is visible
+        result = page.evaluate("""() => {
+            const feedContainers = [
+                document.querySelector("div[role='feed']"),
+                document.querySelector("div[role='main']"),
+                document.querySelector("div[data-pagelet*='Feed']"),
+            ].filter(Boolean);
+            
+            if (!feedContainers.length) return { found: false, reason: "Feed container not found" };
+            
+            const feed = feedContainers[0];
+            const style = window.getComputedStyle(feed);
+            if (style.display === 'none' || style.visibility === 'hidden') {
+                return { found: false, reason: "Feed container is hidden" };
+            }
+            
+            // Check for loading indicators
+            const loadingSelectors = [
+                'div[role="status"]',  // WAI status/loading
+                'div[aria-label*="load"]',
+                '[data-testid*="loading"]',
+                'div:has(> svg):has(> circle)', // Spinner
+            ];
+            
+            for (const selector of loadingSelectors) {
+                const loader = document.querySelector(selector);
+                if (loader) {
+                    const style = window.getComputedStyle(loader);
+                    if (style.display !== 'none' && style.visibility !== 'hidden') {
+                        return { found: false, reason: `Loading indicator detected: ${selector}` };
+                    }
+                }
+            }
+            
+            // Check for skeleton loaders
+            const skeletons = document.querySelectorAll('[aria-label*="skeleton"], [data-testid*="skeleton"]');
+            if (skeletons.length > 0) {
+                const visibleSkeletons = Array.from(skeletons).filter(s => {
+                    const style = window.getComputedStyle(s);
+                    return style.display !== 'none' && style.visibility !== 'hidden';
+                });
+                if (visibleSkeletons.length > 0) {
+                    return { found: false, reason: `${visibleSkeletons.length} skeleton loaders still visible` };
+                }
+            }
+            
+            // Check for actual post cards
+            const postSelectors = [
+                'a[href*="/posts/"]',
+                'a[href*="/videos/"]',
+                'a[href*="/permalink/"]',
+                'a[href*="story_fbid="]',
+                'a[href*="/photo.php"]',
+            ];
+            
+            let postCount = 0;
+            for (const selector of postSelectors) {
+                postCount += document.querySelectorAll(selector).length;
+            }
+            
+            if (postCount === 0) {
+                return { found: false, reason: "No post cards found in feed" };
+            }
+            
+            return { found: true, reason: `Feed ready with ${postCount} post cards`, postCount };
+        }""")
+        
+        if result.get("found"):
+            emit_log(log_hook, "SUCCESS", "Feed validation", result.get("reason"))
+            return True, result.get("reason", "Feed ready")
+        else:
+            emit_log(log_hook, "WARN", "Feed not ready", result.get("reason", "Unknown reason"))
+            return False, result.get("reason", "Feed not ready")
+            
+    except Exception as e:
+        emit_log(log_hook, "ERROR", "Feed validation failed", str(e))
+        return False, f"Feed validation error: {str(e)}"
     page,
     scroll_rounds: int,
     target_url: str = "",
@@ -1086,7 +1284,22 @@ def collect_post_links(
 
     focus_posts_section(page, log_hook=log_hook)
 
+    # Normalize page viewport and zoom for stable scrolling
+    normalize_facebook_page_viewport(page, log_hook=log_hook)
+
     emit_log(log_hook, "INFO", "Checking login state", "Verifying Facebook access before scrolling.")
+    
+    # STRICT FEED VALIDATION - DO NOT PROCEED WITHOUT CONFIRMED FEED
+    feed_ready, feed_reason = validate_facebook_feed_ready(page, target_url=target_url, log_hook=log_hook)
+    if not feed_ready:
+        emit_log(log_hook, "WARN", "Feed not ready", f"Retrying feed validation...")
+        page.wait_for_timeout(500)
+        feed_ready, feed_reason = validate_facebook_feed_ready(page, target_url=target_url, log_hook=log_hook)
+    
+    if not feed_ready:
+        emit_log(log_hook, "ERROR", "Feed validation failed", f"Cannot start collection: {feed_reason}")
+        return []
+    
     initial_state = get_scroll_state(page)
     emit_log(
         log_hook,
@@ -1147,7 +1360,9 @@ def collect_post_links(
             except Exception:
                 pass
             page.wait_for_timeout(200)
-            after_state = wait_for_scroll_growth(page, before_state, SCROLL_WAIT_TIMEOUT)
+            
+            # REAL STABILIZATION: Wait for DOM to truly settle before checking growth
+            after_state = wait_for_scroll_stabilization(page, timeout_ms=SCROLL_WAIT_TIMEOUT)
             height_after = after_state["bodyHeight"]
             anchors_after = after_state["linkCount"]
             article_count_after = after_state.get("articleCount", before_state.get("articleCount", 0))
@@ -2093,37 +2308,95 @@ def extract_metrics_from_loaded_post(
     log_hook: Optional[LogHook] = None,
     scope_snapshot: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    snapshot = scope_snapshot or inspect_active_post_scope(page, target_url=url)
-    reactions, comments_count, shares = extract_text_metrics(page, target_url=url, scope_snapshot=snapshot)
-    notes: list[str] = []
+    """
+    Hardened per-post extraction with retries and DOM stabilization.
+    
+    Steps:
+    1. Scroll post into view and center
+    2. Wait for DOM to stabilize
+    3. Retry extraction up to 3 times for each metric
+    4. Only mark as Unavailable after all retries exhausted
+    """
+    max_retries = 3
+    reactions = None
+    comments_count = None
+    shares = None
     unavailable_metrics = 0
+    notes: list[str] = []
+    
+    # Step 1: Scroll post into view and center
+    try:
+        page.evaluate("""() => {
+            const activePost = document.querySelector('[role="article"]') || 
+                              document.querySelector('div[data-content-id]') ||
+                              document.querySelector('div[role="feed"] > div > div');
+            if (activePost) {
+                activePost.scrollIntoView({block: 'center', behavior: 'smooth'});
+            }
+        }""")
+        page.wait_for_timeout(300)
+    except Exception:
+        pass
+    
+    # Step 2: Wait for DOM stabilization
+    wait_for_scroll_stabilization(page, timeout_ms=3000)
+    page.wait_for_timeout(400)
+    
+    # Step 3: Retry extraction for each metric
+    for attempt in range(1, max_retries + 1):
+        emit_log(log_hook, "INFO", f"Extraction attempt {attempt}/{max_retries}", f"Extracting metrics for {url[:60]}...")
+        
+        snapshot = scope_snapshot or inspect_active_post_scope(page, target_url=url)
+        reactions, comments_count, shares = extract_text_metrics(page, target_url=url, scope_snapshot=snapshot)
+        
+        # Check if we got all metrics
+        metrics_found = 0
+        if reactions is not None:
+            metrics_found += 1
+        if comments_count is not None:
+            metrics_found += 1
+        if shares is not None:
+            metrics_found += 1
+        
+        # If all metrics found, stop retrying
+        if metrics_found == 3:
+            emit_log(log_hook, "SUCCESS", "Metrics extracted", f"All metrics found on attempt {attempt}")
+            break
+        
+        # If this isn't the last attempt, wait before retrying
+        if attempt < max_retries:
+            wait_ms = 300 + (attempt * 150)  # Increasing wait: 450ms, 600ms, 750ms
+            page.wait_for_timeout(wait_ms)
+            # Scroll slightly to trigger re-render
+            page.evaluate("() => window.scrollBy(0, 10)")
+            page.wait_for_timeout(200)
+        else:
+            emit_log(log_hook, "WARN", "Metrics incomplete", f"After {max_retries} attempts: reactions={reactions}, comments={comments_count}, shares={shares}")
+    
+    # Step 4: Mark unavailable only after all retries
     if reactions is None:
-        notes.append("Reactions unavailable in active post view")
-        emit_log(log_hook, "WARN", "Metric unavailable", "Reactions not visible for this post.")
+        notes.append("Reactions unavailable (not visible after 3 retries)")
+        emit_log(log_hook, "WARN", "Metric unavailable", f"Reactions | post_url={url[:60]} | reason=not visible after retries")
         unavailable_metrics += 1
     else:
         emit_log(log_hook, "INFO", "Reactions extracted", str(reactions))
+        
     if comments_count is None:
-        notes.append("Comments count unavailable in active post view")
-        emit_log(log_hook, "WARN", "Metric unavailable", "Comments count not visible for this post.")
+        notes.append("Comments count unavailable (not visible after 3 retries)")
+        emit_log(log_hook, "WARN", "Metric unavailable", f"Comments | post_url={url[:60]} | reason=not visible after retries")
         unavailable_metrics += 1
     else:
         emit_log(log_hook, "INFO", "Comments count extracted", str(comments_count))
     if shares is None:
-        notes.append("Shares unavailable in active post view")
-        emit_log(log_hook, "WARN", "Metric unavailable", "Shares not visible for this post.")
+        notes.append("Shares unavailable (not visible after 3 retries)")
+        emit_log(log_hook, "WARN", "Metric unavailable", f"Shares | post_url={url[:60]} | reason=not visible after retries")
         unavailable_metrics += 1
     else:
         emit_log(log_hook, "INFO", "Shares extracted", str(shares))
 
     comments_preview: list[CommentData] = []
-    if collection_type == "posts_with_comments":
-        comments_preview = extract_visible_comments(page, url, log_hook=log_hook)
-        if not comments_preview:
-            notes.append("No visible comment samples captured")
-        else:
-            emit_log(log_hook, "INFO", "Visible comments captured", f"{len(comments_preview)} comments/replies collected for the active post.")
-
+    # Facebook now collects posts_only - no comment collection
+    
     emit_log(
         log_hook,
         "INFO",
@@ -2208,7 +2481,87 @@ def set_run_diagnostics(payload: dict[str, Any]) -> None:
     LAST_RUN_DIAGNOSTICS.update(payload)
 
 
+def sanitize_excel_value(value: Any, field_name: str = "") -> Any:
+    """
+    Sanitize a value for Excel export. Converts non-scalar values to JSON strings.
+    
+    Args:
+        value: The value to sanitize
+        field_name: The field name for logging purposes
+        
+    Returns:
+        A scalar value (str, int, float, bool, None) safe for Excel
+    """
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        return value
+    
+    # Convert dict/list/object to JSON string
+    import json
+    try:
+        if isinstance(value, (dict, list)):
+            json_str = json.dumps(value)
+            if field_name:
+                import sys
+                print(f"[SANITIZE] Field '{field_name}' converted {type(value).__name__} to JSON", file=sys.stderr)
+            return json_str
+    except Exception:
+        pass
+    
+    # Fallback: convert to string
+    if field_name:
+        import sys
+        print(f"[SANITIZE] Field '{field_name}' converted {type(value).__name__} to string", file=sys.stderr)
+    return str(value)
+
+
+def sanitize_facebook_dataset(posts: list[Any]) -> list[Any]:
+    """
+    GLOBAL DATA SANITIZATION: Recursively sanitize entire dataset before export.
+    
+    Converts all dict/list values to safe types for Excel.
+    Ensures no non-scalar values reach openpyxl.
+    """
+    sanitized_posts = []
+    
+    for post in posts:
+        if isinstance(post, dict):
+            sanitized_post = {}
+            for key, value in post.items():
+                # Sanitize each field
+                if key in ["post_link", "post_date", "post_type", "reactions", "comments_count", "shares", "notes"]:
+                    safe_value = sanitize_excel_value(value, key)
+                    sanitized_post[key] = safe_value
+                    if str(type(value)) != str(type(safe_value)):
+                        # Log that we sanitized this field
+                        pass  # Logging happens in sanitize_excel_value
+                else:
+                    # Unknown field - apply sanitization anyway
+                    sanitized_post[key] = sanitize_excel_value(value, key)
+            sanitized_posts.append(sanitized_post)
+        else:
+            # Non-dict post object - sanitize field by field
+            sanitized_post = {
+                "post_link": sanitize_excel_value(getattr(post, "post_link", getattr(post, "url", "")), "post_link"),
+                "post_date": sanitize_excel_value(getattr(post, "post_date", getattr(post, "date", "")), "post_date"),
+                "post_type": sanitize_excel_value(getattr(post, "post_type", ""), "post_type"),
+                "reactions": sanitize_excel_value(getattr(post, "reactions", "N/A"), "reactions"),
+                "comments_count": sanitize_excel_value(getattr(post, "comments_count", "N/A"), "comments_count"),
+                "shares": sanitize_excel_value(getattr(post, "shares", "N/A"), "shares"),
+                "notes": sanitize_excel_value(getattr(post, "notes", ""), "notes"),
+            }
+            sanitized_posts.append(sanitized_post)
+    
+    return sanitized_posts
+
+
 def save_facebook_excel(posts: list[Any], filename: str, coverage_label: str, collection_type: str) -> None:
+    # GLOBAL SANITIZATION: Apply to entire dataset before writing
+    posts = sanitize_facebook_dataset(posts)
+    
     wb = Workbook()
     ws = wb.active
     ws.title = "Facebook Posts"
@@ -2227,17 +2580,7 @@ def save_facebook_excel(posts: list[Any], filename: str, coverage_label: str, co
                 post.get("reactions", "N/A"),
                 post.get("comments_count", "N/A"),
                 post.get("shares", "N/A"),
-                "; ".join(post.get("notes") or []),
-            ])
-        else:
-            ws.append([
-                post.url,
-                format_post_date(post),
-                post.post_type,
-                "" if post.reactions is None else post.reactions,
-                "" if post.comments_count is None else post.comments_count,
-                "" if post.shares is None else post.shares,
-                post.notes,
+                post.get("notes", ""),
             ])
 
     ws.column_dimensions["A"].width = 64
@@ -2248,33 +2591,8 @@ def save_facebook_excel(posts: list[Any], filename: str, coverage_label: str, co
     ws.column_dimensions["F"].width = 14
     ws.column_dimensions["G"].width = 44
 
-    comments_sheet = wb.create_sheet("Visible Comments")
-    comments_sheet.append(["Post Link", "Thread Type", "Commenter", "Comment Date", "Comment Text"])
-    comment_rows = 0
-    for post in posts:
-        if isinstance(post, dict):
-            comments = post.get("comments_preview") or []
-        else:
-            comments = post.comments_preview
-        for comment in comments:
-            comment_rows += 1
-            comments_sheet.append([
-                comment.post_url,
-                comment.thread_type,
-                comment.commenter_name,
-                comment.comment_date_raw,
-                comment.comment_text,
-            ])
-
-    if comment_rows == 0:
-        comments_sheet["A2"] = "No visible public comment samples were captured for this run."
-
-    comments_sheet.column_dimensions["A"].width = 64
-    comments_sheet.column_dimensions["B"].width = 14
-    comments_sheet.column_dimensions["C"].width = 24
-    comments_sheet.column_dimensions["D"].width = 18
-    comments_sheet.column_dimensions["E"].width = 80
-
+    # Comments sheet removed - Facebook now collects posts_only
+    
     diagnostics_sheet = wb.create_sheet("Diagnostics")
     diagnostics_sheet.append(["Metric", "Value"])
     for key, value in LAST_RUN_DIAGNOSTICS.items():
