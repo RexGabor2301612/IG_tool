@@ -1,0 +1,302 @@
+You are a **Senior Full-Stack Engineer, Playwright Automation Expert, QA Architect, and System Auditor**.
+
+Your task is to **analyze my entire codebase and verify if my Instagram & Facebook Scraper and Analytics System is FULLY aligned with the provided system flowcharts and architectures**.
+
+---
+
+## 🎯 OBJECTIVE
+
+Perform a **deep system audit** and determine:
+
+> “Is the current system implementation 100% aligned, complete, and correctly functioning based on the provided flowchart and system architecture?”
+
+---
+
+## 📊 REFERENCE (CRITICAL)
+
+You MUST strictly validate against these flows:
+
+1. Instagram Scraper & Analytics Flowchart
+2. Facebook Scraper & Analytics Flowchart
+3. Instagram System Architecture (with UI + Logging Panel)
+4. Facebook System Architecture (with UI + Logging Panel)
+
+These define the **expected behavior, structure, and logic** of the system.
+
+---
+
+## 🔍 WHAT YOU MUST CHECK (FULL SYSTEM VALIDATION)
+
+### 1. INPUT CONFIGURATION
+
+* Are all required inputs implemented?
+
+  * URL / Profile / Page
+  * Start Date / End Date
+  * Scroll Rounds
+  * Output Filename
+* Is validation implemented before proceeding?
+
+---
+
+### 2. REVIEW LOOP
+
+* Does the system allow reviewing inputs before execution?
+* Can user edit/cancel before proceeding?
+
+---
+
+### 3. BROWSER & LOGIN FLOW
+
+* Single browser instance per job
+* No duplicate tabs or contexts
+* Manual login supported
+* Login success detection implemented
+* Session persistence:
+
+  * storage_state OR cookies
+  * session reuse on next run
+
+---
+
+### 4. PAGE READINESS GATE (CRITICAL)
+
+Check if system correctly verifies:
+
+* Page fully loaded
+* Posts container visible
+* At least one post detected
+
+If NOT:
+
+* Retry loading logic exists
+* Proper waiting strategy implemented
+
+---
+
+### 5. CAPTCHA / VERIFICATION HANDLING (CRITICAL)
+
+* Detect:
+
+  * CAPTCHA
+  * reCAPTCHA
+  * checkpoint
+  * challenge
+* System must:
+
+  * PAUSE automation
+  * Allow manual solving
+  * Retry detection (max attempts)
+  * Exit safely if failed
+
+🚫 Must NOT bypass CAPTCHA
+
+---
+
+### 6. SYSTEM READY STATE
+
+* System must only become **READY** when:
+
+  * Login success
+  * Page ready
+  * No CAPTCHA pending
+* UI must reflect:
+
+  * “System Ready”
+  * Waiting for GO signal
+
+---
+
+### 7. GO SIGNAL CONTROL (VERY IMPORTANT)
+
+* Scraping MUST NOT start automatically
+* Must wait for user to press GO
+* GO button logic:
+
+  * Disabled when:
+
+    * preparing
+    * waiting_login
+    * waiting_verification
+  * Enabled only when:
+
+    * ready
+
+---
+
+### 8. COLLECTION LOOP (CORE ENGINE)
+
+Validate full loop:
+
+* Scroll page
+* Wait for content load
+* Detect new posts
+* If no new posts → exit condition
+
+For each post:
+
+* Open post individually
+* Extract:
+
+  * link
+  * date
+  * reactions/likes
+  * comments
+  * shares
+* Retry extraction (2–3 attempts)
+* Skip if failed
+
+---
+
+### 9. DATA PROCESSING (INLINE)
+
+* Normalize numbers (e.g., 1.2K → 1200)
+* Convert timestamps properly
+* Remove duplicates
+* Clean text (emoji handling)
+
+---
+
+### 10. PROGRESS SAVING
+
+* Incremental saving implemented?
+* Prevent data loss during long runs?
+
+---
+
+### 11. ETL PIPELINE (POST-COLLECTION)
+
+* De-duplication
+* Data validation
+* Handle missing values
+* Final clean dataset
+
+---
+
+### 12. VALIDATION & BUFFER
+
+* Check:
+
+  * Data count > 0
+* If no data:
+
+  * Show error
+* Buffer data before export
+
+---
+
+### 13. EXPORT SYSTEM
+
+* Excel generation (OpenPyXL / Pandas)
+* Download link provided
+* File integrity correct
+
+---
+
+### 14. LOGGING SYSTEM (UI + BACKEND)
+
+Verify logs include:
+
+* Browser opened
+* Login status
+* CAPTCHA triggered
+* Page readiness
+* GO signal
+* Scroll progress
+* Extraction success/failure
+* Errors
+* Final status
+
+Also check:
+
+* Logs visible in UI panel
+* Real-time updates via WebSocket/API
+
+---
+
+### 15. UI ALIGNMENT (VERY IMPORTANT)
+
+Ensure UI matches architecture:
+
+* Input Panel (left)
+* Logs Panel (right)
+* Metrics Panel (bottom)
+* Status display
+* GO button behavior
+
+---
+
+## ⚠️ VALIDATION RULES
+
+* Be STRICT: do NOT assume features exist
+* If something is missing → mark as ❌
+* If partially implemented → mark as ⚠️
+* If fully correct → mark as ✅
+
+---
+
+## 📦 REQUIRED OUTPUT FORMAT
+
+### 1. SYSTEM COMPLETENESS REPORT
+
+* % implementation of flowchart
+* % alignment with architecture
+
+---
+
+### 2. FEATURE CHECKLIST TABLE
+
+Example:
+
+| Feature          | Status | Notes                |
+| ---------------- | ------ | -------------------- |
+| Login Detection  | ✅      | Works correctly      |
+| Captcha Handling | ⚠️     | Detection incomplete |
+
+---
+
+### 3. CRITICAL GAPS
+
+List all missing or incorrect implementations
+
+---
+
+### 4. ROOT CAUSE ANALYSIS
+
+Explain WHY issues exist:
+
+* logic problem?
+* wrong detection?
+* state mismatch?
+* UI/backend disconnect?
+
+---
+
+### 5. FIX RECOMMENDATIONS
+
+* Provide exact fixes
+* Suggest code-level improvements
+* Align with flowchart logic
+
+---
+
+### 6. FINAL VERDICT
+
+Choose ONE:
+
+* ✅ Fully aligned and production-ready
+* ⚠️ Partially aligned (needs fixes)
+* ❌ Not aligned (major issues)
+
+---
+
+## 🚨 IMPORTANT
+
+* DO NOT rewrite the whole system
+* DO NOT break working parts
+* Focus on **alignment, correctness, and completeness**
+* Maintain **accuracy-first scraping design**
+
+---
+
+Now begin the **full system audit**.

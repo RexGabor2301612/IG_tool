@@ -224,13 +224,24 @@ class JobController:
         self._broadcast_snapshot()
         return True
 
-    def request_go(self) -> bool:
+    def request_go(self) -> tuple[bool, str]:
+        """Request GO signal. Returns (success, error_reason)."""
         with self.lock:
-            if self.status != "ready" or self.go_requested or not self.ready_to_scrape:
-                return False
+            if not self.browser_session_created:
+                return False, "Browser session not started yet."
+            if self.verification_required:
+                return False, "Verification required. Please complete it manually in the browser."
+            if self.login_required:
+                return False, "Login required. Please complete it manually in the browser."
+            if self.status != "ready":
+                return False, f"Page is not ready yet (status: {self.status}). Please wait."
+            if self.go_requested:
+                return False, "GO signal already received."
+            if not self.ready_to_scrape:
+                return False, "Page readiness check failed."
             self.go_requested = True
             self.go_event.set()
-        return True
+        return True, ""
 
     def clear_logs(self) -> None:
         with self.lock:
@@ -262,9 +273,11 @@ class JobController:
             self.etl.save_post(record)
 
     def _wait_for_ready(self, page, context, config: WebScrapeConfig) -> None:
+        self._log(LogLevel.INFO, "Checking for saved session", f"Looking for cached {self.adapter.name} credentials.")
         deadline = time.monotonic() + (LOGIN_READY_TIMEOUT / 1000)
         verification_logged = False
         login_logged = False
+        readiness_logged = False
         last_ping = 0.0
 
         while time.monotonic() < deadline:
@@ -282,6 +295,7 @@ class JobController:
                     self.ready_to_scrape = False
                     self.browser_url = page.url or config.target_url
                 if not verification_logged:
+                    self._transition(ScrapeState.WAITING_VERIFICATION, verification_reason)
                     self._log(LogLevel.WARN, "Verification checkpoint detected", verification_reason)
                     self._log(LogLevel.WARN, "Waiting for user verification", "Please complete verification in the opened browser.")
                     verification_logged = True
@@ -303,6 +317,7 @@ class JobController:
                     self.ready_to_scrape = False
                     self.browser_url = page.url or config.target_url
                 if not login_logged:
+                    self._transition(ScrapeState.WAITING_LOGIN, login_reason or "Login required")
                     self._log(LogLevel.WARN, "Login required", login_reason or "Login required before extraction.")
                     self._log(LogLevel.WARN, "Waiting for login", "Please complete login in the opened browser.")
                     login_logged = True
@@ -327,9 +342,14 @@ class JobController:
                     self.browser_url = page.url or config.target_url
                 self._transition(ScrapeState.PAGE_READY, "Page ready")
                 self._log(LogLevel.SUCCESS, f"{self.adapter.name} page ready", "Target page is visible and ready.")
-                self._log(LogLevel.INFO, "Ready for GO signal", "Click GO / START EXTRACTION to continue.")
+                self._log(LogLevel.INFO, "Page readiness check passed", "Feed/grid content is visible.")
+                self._log(LogLevel.SUCCESS, "Ready for GO signal", "Click GO / START EXTRACTION to continue.")
                 self._broadcast_snapshot()
                 return
+
+            if not readiness_logged:
+                readiness_logged = True
+                self._log(LogLevel.INFO, "Checking page readiness", "Waiting for page content to load...")
 
             time.sleep(0.3)
 
@@ -351,6 +371,7 @@ class JobController:
                 self.started_at = time.time()
                 self.output_file = config.output_file
             self._log(LogLevel.INFO, f"{self.adapter.name} browser opened", "Playwright browser session created.")
+            self._log(LogLevel.INFO, "Browser mode", self.adapter.name + " " + ("headless mode" if not self.adapter.uses_local_browser_window() else "local browser window"))
             try:
                 viewport = page.viewport_size or {}
                 self._log(
@@ -362,6 +383,7 @@ class JobController:
                 pass
 
             page.goto(config.target_url, wait_until="domcontentloaded", timeout=60_000)
+            self._log(LogLevel.INFO, "Page loaded", f"Navigated to {config.target_url}")
 
             if self.adapter.auto_login_if_needed(page, context, config.target_url, log_hook=self._log_hook):
                 self._log(LogLevel.SUCCESS, "Session restored", "Auto-login restored the session.")
@@ -447,6 +469,7 @@ class JobController:
                         self.buffer.add(record)
                     with self.lock:
                         self.posts_success += 1
+                    self._log(LogLevel.SUCCESS, "Extracted metrics", f"Reactions, comments, shares from {link}")
                 except Exception as exc:
                     if exc.__class__.__name__ == "AuthRequiredError":
                         self._log(LogLevel.WARN, "Auth required during extraction", str(exc))
@@ -454,13 +477,30 @@ class JobController:
                         continue
                     with self.lock:
                         self.errors += 1
-                    self._log(LogLevel.WARN, "Extraction failed", f"{link} ({type(exc).__name__}: {exc})")
+                    self._log(LogLevel.ERROR, "Extraction failed with reason", f"{link}\nReason: {type(exc).__name__}: {exc}")
+                    self._log(LogLevel.WARN, "Extraction failed", f"Retrying next link...")
 
                 with self.lock:
                     self.posts_processed += 1
 
             self._flush_buffer()
+            
+            if self.posts_success == 0:
+                self._log(LogLevel.WARN, "No data found", "No posts were successfully extracted.")
+                self._log(LogLevel.ERROR, "Export blocked", "Cannot export Excel without any data. Check scroll rounds, date range, or visibility settings.")
+                with self.lock:
+                    self.status = "failed"
+                    self.active_task = "Failed - No data"
+                    self.progress = 100
+                    self.finished_at = time.time()
+                self._transition(ScrapeState.COLLECTION_FAILED, "No posts extracted")
+                self._broadcast_snapshot()
+                raise RuntimeError("No posts extracted. Excel export blocked.")
+            
             coverage_label = self.adapter.format_date_coverage(config.start_date, config.end_date)
+            self._log(LogLevel.INFO, "Data validated", f"Ready to export {self.posts_success} posts.")
+            self._log(LogLevel.INFO, "Starting Excel export", f"Normalizing numbers, removing duplicates, converting dates...")
+            
             if hasattr(self.adapter, "set_run_diagnostics"):
                 try:
                     self.adapter.set_run_diagnostics(
@@ -478,6 +518,11 @@ class JobController:
                 except Exception:
                     pass
             self.adapter.export_excel(posts, config.output_file, coverage_label, config.collection_type)
+            
+            if not Path(config.output_file).exists():
+                self._log(LogLevel.ERROR, "Excel save failed", f"File not created at {config.output_file}")
+                raise RuntimeError(f"Excel file was not saved: {config.output_file}")
+            
             with self.lock:
                 self.progress = 100
                 self.status = "completed"
@@ -485,6 +530,7 @@ class JobController:
                 self.finished_at = time.time()
             self._transition(ScrapeState.COLLECTION_COMPLETED, "Exported")
             self._log(LogLevel.SUCCESS, "Excel saved", config.output_file)
+            self._log(LogLevel.SUCCESS, "Extraction complete", f"Processed {self.posts_success}/{self.posts_processed} posts with {self.errors} errors.")
             self._broadcast_snapshot()
 
             context.close()
@@ -796,15 +842,17 @@ def status_facebook():
 
 @app.post("/api/go")
 def go_instagram():
-    if not INSTAGRAM.request_go():
-        return jsonify({"success": False, "error": "Please complete login/verification first."}), 409
+    success, error_reason = INSTAGRAM.request_go()
+    if not success:
+        return jsonify({"success": False, "error": error_reason}), 409
     return jsonify({"success": True, "message": "GO signal received."})
 
 
 @app.post("/facebook/api/go")
 def go_facebook():
-    if not FACEBOOK.request_go():
-        return jsonify({"success": False, "error": "Please complete login/verification first."}), 409
+    success, error_reason = FACEBOOK.request_go()
+    if not success:
+        return jsonify({"success": False, "error": error_reason}), 409
     return jsonify({"success": True, "message": "GO signal received."})
 
 
